@@ -7,7 +7,7 @@ import secrets
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "CX Agent Hub"
-    APP_VERSION: str = "1.0.0"
+    APP_VERSION: str = "2.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
 
@@ -33,6 +33,20 @@ class Settings(BaseSettings):
 
     # Rate limiting (future)
     RATE_LIMIT_PER_MINUTE: int = 100
+
+    # ── Phase 2: Queue (ARQ / Redis) ───────────────────────────────────────────
+    REDIS_URL: str = "redis://redis:6379"
+    # Set False to skip queue enqueue (e.g. in unit tests that call worker directly)
+    AI_QUEUE_ENABLED: bool = True
+
+    # ── Phase 2: AI Provider ───────────────────────────────────────────────────
+    # "mock" uses the built-in deterministic mock (no API key needed).
+    # "openai" stub is present but not fully implemented in this phase.
+    AI_PROVIDER: str = "mock"
+    OPENAI_API_KEY: Optional[str] = None
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    AI_MAX_RETRIES: int = 3
+    AI_JOB_TIMEOUT_SECONDS: int = 300
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

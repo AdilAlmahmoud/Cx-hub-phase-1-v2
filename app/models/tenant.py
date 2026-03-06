@@ -1,6 +1,6 @@
 import uuid
 from typing import Optional, List, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Text, ForeignKey, UniqueConstraint, JSON
+from sqlalchemy import String, Boolean, Text, Float, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
@@ -61,6 +61,20 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     default_language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
     business_hours: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     custom_settings: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # ── Phase 2: AI policy fields ──────────────────────────────────────────────
+    # Language the AI should reply in (ISO 639-1)
+    ai_language: Mapped[str] = mapped_column(String(10), default="en", nullable=False)
+    # Tone for AI-generated replies
+    ai_tone: Mapped[str] = mapped_column(String(50), default="professional", nullable=False)
+    # Minimum confidence required for safe_to_auto_send=True
+    confidence_threshold: Mapped[float] = mapped_column(Float, default=0.7, nullable=False)
+    # "off" | "supervised" | "auto"
+    auto_send_mode: Mapped[str] = mapped_column(String(20), default="off", nullable=False)
+    # List of keywords that always trigger escalation
+    escalation_keywords: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Template message sent to customer when handing off to human agent
+    handoff_message_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Relationship
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

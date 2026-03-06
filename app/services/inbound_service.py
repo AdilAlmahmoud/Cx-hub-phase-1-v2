@@ -6,20 +6,27 @@ Orchestrates the full pipeline when a channel adapter produces a UnifiedEvent:
   2. Resolve or create Conversation
   3. Create or update Ticket
   4. Persist EventLog
+  5. (Phase 2) If AI is enabled for the tenant, create AIJob and enqueue it
+
+The inbound API path returns 202 immediately after step 4 — step 5 is
+fire-and-forget and must not block or fail the inbound response.
 """
 import uuid
 from datetime import datetime, timezone
+
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.adapters.base import UnifiedEvent
-from app.models.conversation import ConversationStatus
-from app.models.ticket import TicketStatus, TicketPriority
+from app.models.ticket import TicketPriority
 from app.models.event_log import EventLog
+from app.models.tenant import TenantConfig
 from app.schemas.conversation import ConversationCreate
 from app.schemas.ticket import TicketCreate
 from app.services.customer_service import customer_service
 from app.services.conversation_service import conversation_service
 from app.services.ticket_service import ticket_service
+from app.services.ai_job_service import ai_job_service
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
@@ -93,7 +100,50 @@ class InboundMessageService:
             direction="inbound",
         )
         db.add(event_log)
-        await db.commit()
+        await db.flush()  # Assign event_log.id before AI job creation
+
+        # 5. (Phase 2) Create AI job if AI is enabled for this tenant
+        ai_job_id: str | None = None
+        try:
+            cfg_result = await db.execute(
+                select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
+            )
+            tenant_cfg = cfg_result.scalar_one_or_none()
+
+            if tenant_cfg and tenant_cfg.ai_enabled:
+                job = await ai_job_service.create_job(
+                    db=db,
+                    tenant_id=tenant_id,
+                    ticket_id=ticket.id,
+                    conversation_id=conversation.id,
+                    event_log_id=event_log.id,
+                )
+                ai_job_id = str(job.id)
+                await db.commit()
+
+                # Enqueue asynchronously — failure here must not fail the inbound
+                from app.core.queue import enqueue_ai_job
+                enqueued = await enqueue_ai_job(ai_job_id)
+                logger.info(
+                    "ai_job_scheduled",
+                    ai_job_id=ai_job_id,
+                    enqueued=enqueued,
+                    tenant_id=str(tenant_id),
+                )
+            else:
+                await db.commit()
+        except Exception as exc:
+            # AI job creation must never fail the inbound pipeline
+            logger.error(
+                "ai_job_creation_error",
+                error=str(exc),
+                tenant_id=str(tenant_id),
+                ticket_id=str(ticket.id),
+            )
+            try:
+                await db.commit()
+            except Exception:
+                pass
 
         return {
             "event_log_id": str(event_log.id),
@@ -103,6 +153,7 @@ class InboundMessageService:
             "customer_created": customer_created,
             "conversation_created": conversation_created,
             "ticket_created": ticket_created,
+            "ai_job_id": ai_job_id,
         }
 
 

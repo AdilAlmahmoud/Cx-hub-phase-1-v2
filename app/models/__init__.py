@@ -4,6 +4,8 @@ from app.models.customer import Customer
 from app.models.conversation import Conversation
 from app.models.ticket import Ticket
 from app.models.event_log import EventLog
+from app.models.ai_job import AIJob, AIJobStatus
+from app.models.ai_result import AIResult
 
 __all__ = [
     "Tenant",
@@ -14,4 +16,7 @@ __all__ = [
     "Conversation",
     "Ticket",
     "EventLog",
+    "AIJob",
+    "AIJobStatus",
+    "AIResult",
 ]

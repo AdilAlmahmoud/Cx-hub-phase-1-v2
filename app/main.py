@@ -1,7 +1,6 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
@@ -14,7 +13,14 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("startup", app=settings.APP_NAME, version=settings.APP_VERSION, env=settings.ENVIRONMENT)
+
+    # Phase 2: initialise ARQ Redis pool (non-fatal if Redis is unavailable)
+    from app.core.queue import init_queue, close_queue
+    await init_queue()
+
     yield
+
+    await close_queue()
     logger.info("shutdown", app=settings.APP_NAME)
 
 
@@ -23,7 +29,8 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "CX Agent Hub — Multi-tenant AI-powered customer service platform. "
-        "Phase 1: Channel adapter layer, multi-tenant foundation, RBAC."
+        "Phase 1: Channel adapter layer, multi-tenant foundation, RBAC. "
+        "Phase 2: Async AI decision engine, job queue, structured AI results."
     ),
     docs_url="/docs",
     redoc_url="/redoc",

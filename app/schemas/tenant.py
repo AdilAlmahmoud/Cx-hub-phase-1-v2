@@ -11,6 +11,15 @@ class TenantConfigBase(BaseModel):
     business_hours: Optional[dict] = None
     custom_settings: Optional[dict] = None
 
+    # ── Phase 2: AI policy ────────────────────────────────────────────────────
+    ai_language: str = "en"
+    ai_tone: str = "professional"
+    confidence_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
+    # "off" | "supervised" | "auto"
+    auto_send_mode: str = "off"
+    escalation_keywords: Optional[List[str]] = None
+    handoff_message_template: Optional[str] = None
+
 
 class TenantConfigCreate(TenantConfigBase):
     pass
@@ -22,6 +31,14 @@ class TenantConfigUpdate(BaseModel):
     default_language: Optional[str] = None
     business_hours: Optional[dict] = None
     custom_settings: Optional[dict] = None
+
+    # ── Phase 2: AI policy ────────────────────────────────────────────────────
+    ai_language: Optional[str] = None
+    ai_tone: Optional[str] = None
+    confidence_threshold: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    auto_send_mode: Optional[str] = None
+    escalation_keywords: Optional[List[str]] = None
+    handoff_message_template: Optional[str] = None
 
 
 class TenantConfigResponse(TenantConfigBase):

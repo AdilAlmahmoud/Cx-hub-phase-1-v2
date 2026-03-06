@@ -4,8 +4,10 @@ from fastapi import APIRouter, HTTPException, Query, status
 from app.api.deps import DB, CurrentTenant, AgentOrOwner, OwnerOnly
 from app.models.ticket import TicketStatus, TicketPriority
 from app.schemas.ticket import TicketCreate, TicketUpdate, TicketResponse, TicketDetailResponse, TicketFilter
+from app.schemas.ai_result import AIResultResponse
 from app.schemas.common import PaginatedResponse
 from app.services.ticket_service import ticket_service
+from app.services.ai_job_service import ai_job_service
 
 router = APIRouter(prefix="/tickets", tags=["Tickets"])
 
@@ -69,3 +71,32 @@ async def update_ticket(
         raise HTTPException(status_code=404, detail="Ticket not found")
     ticket = await ticket_service.update(db, ticket, body)
     return TicketResponse.model_validate(ticket)
+
+
+@router.get("/{ticket_id}/ai-result", response_model=AIResultResponse, tags=["AI Jobs"])
+async def get_ticket_ai_result(
+    ticket_id: uuid.UUID,
+    db: DB,
+    current_tenant: CurrentTenant,
+    _: AgentOrOwner,
+):
+    """
+    Retrieve the most recent AI decision result for a ticket.
+
+    Returns the structured AI output including:
+    - Detected intent
+    - Draft reply candidate (not sent in Phase 2)
+    - Confidence score
+    - Escalation recommendation and reasons
+    - Safe-to-auto-send flag
+    """
+    ticket = await ticket_service.get_by_id(db, ticket_id, current_tenant.id)
+    if not ticket:
+        raise HTTPException(status_code=404, detail="Ticket not found")
+    result = await ai_job_service.get_result_by_ticket(db, ticket_id, current_tenant.id)
+    if not result:
+        raise HTTPException(
+            status_code=404,
+            detail="No AI result available for this ticket — AI may not be enabled or processing is pending",
+        )
+    return AIResultResponse.model_validate(result)
