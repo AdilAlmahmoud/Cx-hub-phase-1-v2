@@ -13,7 +13,7 @@ from arq.connections import RedisSettings
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
-from app.worker.tasks import process_ai_job  # noqa: F401 — registered via functions list
+from app.worker.tasks import process_ai_job, process_knowledge_ingestion  # noqa: F401
 
 configure_logging()
 logger = get_logger(__name__)
@@ -33,7 +33,7 @@ async def shutdown(ctx: dict) -> None:
 
 class WorkerSettings:
     """ARQ worker configuration."""
-    functions = [process_ai_job]
+    functions = [process_ai_job, process_knowledge_ingestion]
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
     on_startup = startup
     on_shutdown = shutdown

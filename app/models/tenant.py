@@ -1,6 +1,6 @@
 import uuid
 from typing import Optional, List, TYPE_CHECKING
-from sqlalchemy import String, Boolean, Text, Float, ForeignKey, UniqueConstraint, JSON
+from sqlalchemy import String, Boolean, Text, Float, Integer, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.dialects.postgresql import UUID
 from app.core.database import Base
@@ -75,6 +75,12 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     escalation_keywords: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # Template message sent to customer when handing off to human agent
     handoff_message_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
+    # Enable RAG: retrieve knowledge chunks and inject them into AI context
+    knowledge_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Number of top-k knowledge chunks to retrieve per AI job
+    retrieval_top_k: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
 
     # Relationship
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

@@ -79,6 +79,28 @@ async def enqueue_ai_job(ai_job_id: str) -> bool:
         return False
 
 
+async def enqueue_knowledge_ingestion(file_id: str) -> bool:
+    """
+    Enqueue a knowledge file ingestion job by file ID.
+
+    Returns True if successfully enqueued, False if pool is unavailable.
+    The KnowledgeFile record must already exist in the DB before calling this.
+    """
+    if _arq_pool is None:
+        logger.warning(
+            "ai_queue_not_available_skip_enqueue",
+            file_id=file_id,
+        )
+        return False
+    try:
+        await _arq_pool.enqueue_job("process_knowledge_ingestion", file_id=file_id)
+        logger.info("knowledge_ingestion_enqueued", file_id=file_id)
+        return True
+    except Exception as exc:
+        logger.error("knowledge_ingestion_enqueue_error", file_id=file_id, error=str(exc))
+        return False
+
+
 def get_queue_pool():
     """Return the current ARQ pool (may be None)."""
     return _arq_pool

@@ -241,10 +241,17 @@ class TestAIDecisionEngine:
 
     @pytest.mark.asyncio
     async def test_engine_propagates_provider_error(self, engine):
-        from app.ai.openai_provider import OpenAIProvider
-        broken_engine = AIDecisionEngine(provider=OpenAIProvider(api_key="x"))
+        """Engine re-raises exceptions from the provider."""
+        class _ErrorProvider:
+            provider_name = "error"
+            async def generate_decision(self, ctx):
+                raise ValueError("provider exploded")
+            async def health_check(self):
+                return False
+
+        broken_engine = AIDecisionEngine(provider=_ErrorProvider())
         ctx = make_context(message_text="Hello!")
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ValueError, match="provider exploded"):
             await broken_engine.process(ctx)
 
 

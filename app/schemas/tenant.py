@@ -20,6 +20,10 @@ class TenantConfigBase(BaseModel):
     escalation_keywords: Optional[List[str]] = None
     handoff_message_template: Optional[str] = None
 
+    # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
+    knowledge_enabled: bool = False
+    retrieval_top_k: int = Field(default=3, ge=1, le=20)
+
 
 class TenantConfigCreate(TenantConfigBase):
     pass
@@ -39,6 +43,10 @@ class TenantConfigUpdate(BaseModel):
     auto_send_mode: Optional[str] = None
     escalation_keywords: Optional[List[str]] = None
     handoff_message_template: Optional[str] = None
+
+    # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
+    knowledge_enabled: Optional[bool] = None
+    retrieval_top_k: Optional[int] = Field(default=None, ge=1, le=20)
 
 
 class TenantConfigResponse(TenantConfigBase):

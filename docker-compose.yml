@@ -1,9 +1,11 @@
 version: "3.9"
 
 services:
-  # ── PostgreSQL Database ────────────────────────────────────────────────────
+  # ── PostgreSQL Database with pgvector ─────────────────────────────────────
+  # Phase 3: use pgvector/pgvector:pg16 instead of postgres:16-alpine.
+  # This image ships PostgreSQL 16 with the pgvector extension pre-installed.
   db:
-    image: postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: cxhub_db
     restart: unless-stopped
     environment:
@@ -88,6 +90,13 @@ services:
       AI_PROVIDER: ${AI_PROVIDER:-mock}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_QUEUE_ENABLED: "true"
+      # Phase 3: Knowledge Base
+      KNOWLEDGE_STORAGE_PATH: /data/knowledge
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      KNOWLEDGE_CHUNK_SIZE: ${KNOWLEDGE_CHUNK_SIZE:-1000}
+      KNOWLEDGE_CHUNK_OVERLAP: ${KNOWLEDGE_CHUNK_OVERLAP:-100}
     ports:
       - "${API_PORT:-8000}:8000"
     healthcheck:
@@ -98,8 +107,9 @@ services:
       start_period: 10s
     volumes:
       - ./logs:/app/logs
+      - knowledge_data:/data/knowledge
 
-  # ── AI Worker (Phase 2) ────────────────────────────────────────────────────
+  # ── AI + Knowledge Worker (Phase 2 + Phase 3) ─────────────────────────────
   worker:
     build:
       context: .
@@ -123,10 +133,22 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       AI_MAX_RETRIES: ${AI_MAX_RETRIES:-3}
       AI_JOB_TIMEOUT_SECONDS: ${AI_JOB_TIMEOUT_SECONDS:-300}
+      # Phase 3: Knowledge Base
+      KNOWLEDGE_STORAGE_PATH: /data/knowledge
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-mock}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      KNOWLEDGE_CHUNK_SIZE: ${KNOWLEDGE_CHUNK_SIZE:-1000}
+      KNOWLEDGE_CHUNK_OVERLAP: ${KNOWLEDGE_CHUNK_OVERLAP:-100}
     command: ["python", "-m", "app.worker.main"]
     volumes:
       - ./logs:/app/logs
+      - knowledge_data:/data/knowledge
 
 volumes:
   postgres_data:
+    driver: local
+  # Phase 3: Persistent storage for uploaded knowledge files.
+  # Both the API (upload) and worker (read during ingestion) share this volume.
+  knowledge_data:
     driver: local

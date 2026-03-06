@@ -15,6 +15,10 @@ structlog==24.4.0
 # Phase 2: async job queue (ARQ = asyncio Redis Queue)
 arq==0.26.1
 redis==5.2.1
+# Phase 3: pgvector, OpenAI, PDF parsing
+pgvector==0.3.6
+openai==1.59.3
+pypdf==4.3.1
 pytest==8.3.4
 pytest-asyncio==0.24.0
 pytest-cov==6.0.0

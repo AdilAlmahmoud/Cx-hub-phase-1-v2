@@ -27,6 +27,9 @@ class AIResultResponse(BaseModel):
     model_name: Optional[str]
     processing_duration_ms: Optional[int]
 
+    # Phase 3: RAG metadata
+    retrieved_chunk_ids: Optional[List[str]] = None
+
     created_at: datetime
     updated_at: datetime
 

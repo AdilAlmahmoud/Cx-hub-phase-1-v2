@@ -2,9 +2,10 @@
 AI Provider abstraction layer.
 
 Defines the common contract for all AI providers:
-  - AIProcessingContext  — input to the AI engine (message + tenant policy)
-  - AIDecisionResult     — structured output from the AI engine
-  - BaseAIProvider       — abstract base that every provider must implement
+  - RetrievedChunk      — a knowledge chunk retrieved via RAG
+  - AIProcessingContext — input to the AI engine (message + tenant policy + RAG context)
+  - AIDecisionResult    — structured output from the AI engine
+  - BaseAIProvider      — abstract base that every provider must implement
 """
 from abc import ABC, abstractmethod
 from typing import List, Optional
@@ -21,11 +22,20 @@ class ConversationMessage(BaseModel):
     channel: str
 
 
+class RetrievedChunk(BaseModel):
+    """A knowledge chunk retrieved from the tenant knowledge base via RAG."""
+    chunk_id: str
+    knowledge_file_id: str
+    content: str
+    chunk_index: int = 0
+    similarity_score: float = Field(default=0.0, ge=0.0, le=1.0)
+
+
 class AIProcessingContext(BaseModel):
     """
     Full context handed to the AI provider for a single processing run.
-    Includes the triggering message, conversation history, and the
-    tenant-level AI policy (language, tone, thresholds, etc.).
+    Includes the triggering message, conversation history, tenant-level AI
+    policy, and optionally knowledge chunks retrieved via RAG.
     """
     # Job / entity identifiers
     ai_job_id: str
@@ -51,6 +61,11 @@ class AIProcessingContext(BaseModel):
     escalation_keywords: List[str] = []
     handoff_message_template: Optional[str] = None
 
+    # ── Phase 3: RAG context ──────────────────────────────────────────────────
+    # Knowledge chunks retrieved from the tenant knowledge base.
+    # Empty when knowledge_enabled=False or when no relevant chunks are found.
+    retrieved_chunks: List[RetrievedChunk] = []
+
 
 class AIDecisionResult(BaseModel):
     """
@@ -70,6 +85,10 @@ class AIDecisionResult(BaseModel):
     provider_name: str
     model_name: Optional[str] = None
     processing_duration_ms: int = 0
+
+    # ── Phase 3: RAG metadata ─────────────────────────────────────────────────
+    # IDs of knowledge chunks that were used to generate this decision.
+    retrieved_chunk_ids: List[str] = []
 
 
 class BaseAIProvider(ABC):

@@ -88,6 +88,7 @@ class MockAIProvider(BaseAIProvider):
     - Assigns fixed confidence per intent category
     - Generates canned reply drafts for safe intents
     - Applies escalation and auto-send policy from context
+    - Phase 3: Incorporates retrieved_chunks into answer when present
     """
 
     @property
@@ -124,7 +125,21 @@ class MockAIProvider(BaseAIProvider):
         safe_to_auto_send = False
 
         if not should_escalate:
-            answer = _CANNED_RESPONSES.get(intent, _DEFAULT_REPLY)
+            base_answer = _CANNED_RESPONSES.get(intent, _DEFAULT_REPLY)
+
+            # Phase 3: enrich answer with retrieved knowledge chunks
+            if context.retrieved_chunks:
+                kb_snippets = "\n".join(
+                    f"  [{i+1}] {chunk.content[:300]}"
+                    for i, chunk in enumerate(context.retrieved_chunks[:3])
+                )
+                answer = (
+                    f"{base_answer}\n\n"
+                    f"Based on our knowledge base:\n{kb_snippets}"
+                )
+            else:
+                answer = base_answer
+
             # Honour auto_send_mode policy
             if (
                 context.auto_send_mode == "auto"
@@ -137,6 +152,10 @@ class MockAIProvider(BaseAIProvider):
 
         duration_ms = int(time.monotonic() * 1000) - start_ms
 
+        # Phase 3: track which chunks were used
+        chunk_ids = [c.chunk_id for c in context.retrieved_chunks]
+        rag_note = f"; RAG: {len(chunk_ids)} chunk(s) used" if chunk_ids else ""
+
         return AIDecisionResult(
             intent=intent,
             answer=answer,
@@ -145,10 +164,11 @@ class MockAIProvider(BaseAIProvider):
             risk_flags=risk_flags,
             escalation_reason=escalation_reason,
             safe_to_auto_send=safe_to_auto_send,
-            processing_notes=f"Mock provider: intent={intent}, mode={context.auto_send_mode}",
+            processing_notes=f"Mock provider: intent={intent}, mode={context.auto_send_mode}{rag_note}",
             provider_name=self.provider_name,
             model_name="mock-v1",
             processing_duration_ms=duration_ms,
+            retrieved_chunk_ids=chunk_ids,
         )
 
     async def health_check(self) -> bool:

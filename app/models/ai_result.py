@@ -57,6 +57,10 @@ class AIResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     processing_duration_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     raw_provider_response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # ── Phase 3: RAG metadata ──────────────────────────────────────────────────
+    # IDs of KnowledgeChunk records used to produce this result (may be empty)
+    retrieved_chunk_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     # Relationship
     ai_job: Mapped["AIJob"] = relationship("AIJob", back_populates="ai_result")
 

@@ -1,9 +1,9 @@
 """
-ARQ worker tasks for Phase 2 AI processing.
+ARQ worker tasks — Phase 2 AI processing + Phase 3 knowledge ingestion.
 
 Design rules:
-- Every task is idempotent: re-running with the same job ID is safe.
-- Core logic lives in _process_ai_job_inner() so tests can call it directly
+- Every task is idempotent: re-running with the same ID is safe.
+- Core logic lives in _*_inner() functions so tests can call them directly
   without a running Redis instance.
 - Failures increment retry_count; when max_retries is exceeded the job is
   marked 'failed' permanently.
@@ -26,7 +26,7 @@ from app.models.tenant import TenantConfig
 logger = get_logger(__name__)
 
 
-# ── Internal processing logic (testable without ARQ/Redis) ────────────────────
+# ── AI Job (Phase 2 + Phase 3 RAG) ───────────────────────────────────────────
 
 async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
     """
@@ -36,6 +36,9 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
     - If status is already 'completed' → skip (return early).
     - If status is 'failed' and retry_count >= max_retries → skip.
     - Otherwise process regardless of current status (handles requeued jobs).
+
+    Phase 3: If knowledge_enabled=True, embeds the message and retrieves
+    relevant knowledge chunks (RAG) before calling the AI engine.
     """
     job_uuid = uuid.UUID(ai_job_id)
 
@@ -82,6 +85,8 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
         auto_send_mode = getattr(tenant_cfg, "auto_send_mode", "off") if tenant_cfg else "off"
         escalation_keywords = getattr(tenant_cfg, "escalation_keywords", None) if tenant_cfg else None
         handoff_template = getattr(tenant_cfg, "handoff_message_template", None) if tenant_cfg else None
+        knowledge_enabled = getattr(tenant_cfg, "knowledge_enabled", False) if tenant_cfg else False
+        retrieval_top_k = getattr(tenant_cfg, "retrieval_top_k", 3) if tenant_cfg else 3
 
         # ── 5. Load conversation history (last 10 events) ─────────────────────
         events_result = await db.execute(
@@ -103,6 +108,7 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
 
         # Derive message_text from the triggering event_log
         message_text: Optional[str] = None
+        channel = "unknown"
         if job.event_log_id:
             for evt in event_rows:
                 if evt.id == job.event_log_id:
@@ -110,7 +116,6 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
                     channel = evt.channel
                     break
             else:
-                # Fallback: use the last inbound message in history
                 inbound = [e for e in event_rows if e.direction == "inbound"]
                 message_text = inbound[-1].message_text if inbound else None
                 channel = inbound[-1].channel if inbound else "unknown"
@@ -119,7 +124,38 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
             message_text = inbound[-1].message_text if inbound else None
             channel = inbound[-1].channel if inbound else "unknown"
 
-        # ── 6. Build context and run AI engine ────────────────────────────────
+        # ── 6. Phase 3: RAG retrieval (optional) ──────────────────────────────
+        retrieved_chunks = []
+        if knowledge_enabled and message_text:
+            try:
+                from app.embeddings.openai_provider import get_embedding_provider
+                from app.services.knowledge_service import retrieve_similar_chunks
+
+                embed_provider = get_embedding_provider()
+                query_embedding = await embed_provider.embed_text(message_text)
+                retrieved_chunks = await retrieve_similar_chunks(
+                    db=db,
+                    tenant_id=job.tenant_id,
+                    query_embedding=query_embedding,
+                    top_k=retrieval_top_k,
+                )
+                if retrieved_chunks:
+                    logger.info(
+                        "ai_rag_context_used",
+                        ai_job_id=ai_job_id,
+                        tenant_id=str(job.tenant_id),
+                        chunk_count=len(retrieved_chunks),
+                    )
+            except Exception as rag_exc:
+                # Non-fatal: continue without RAG context
+                logger.warning(
+                    "ai_rag_retrieval_failed",
+                    ai_job_id=ai_job_id,
+                    error=str(rag_exc),
+                )
+
+        # ── 7. Build context and run AI engine ────────────────────────────────
+        from app.ai.base import RetrievedChunk as _RC
         context = AIProcessingContext(
             ai_job_id=ai_job_id,
             tenant_id=str(job.tenant_id),
@@ -134,13 +170,23 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
             auto_send_mode=auto_send_mode,
             escalation_keywords=escalation_keywords or [],
             handoff_message_template=handoff_template,
+            retrieved_chunks=[
+                _RC(
+                    chunk_id=c.chunk_id,
+                    knowledge_file_id=c.knowledge_file_id,
+                    content=c.content,
+                    chunk_index=c.chunk_index,
+                    similarity_score=c.similarity_score,
+                )
+                for c in retrieved_chunks
+            ],
         )
 
         provider = get_ai_provider()
         engine = AIDecisionEngine(provider=provider)
         decision = await engine.process(context)
 
-        # ── 7. Persist AIResult ───────────────────────────────────────────────
+        # ── 8. Persist AIResult ───────────────────────────────────────────────
         ai_result = AIResult(
             tenant_id=job.tenant_id,
             ai_job_id=job.id,
@@ -156,11 +202,12 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
             provider_name=decision.provider_name,
             model_name=decision.model_name,
             processing_duration_ms=decision.processing_duration_ms,
-            raw_provider_response=None,  # Populated by real providers in Phase 3
+            raw_provider_response=None,
+            retrieved_chunk_ids=decision.retrieved_chunk_ids or [],
         )
         db.add(ai_result)
 
-        # ── 8. Mark job completed ─────────────────────────────────────────────
+        # ── 9. Mark job completed ─────────────────────────────────────────────
         job.status = AIJobStatus.completed
         job.completed_at = datetime.now(timezone.utc)
         await db.commit()
@@ -183,7 +230,7 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
         }
 
     except Exception as exc:
-        # ── 9. Handle failure with retry tracking ─────────────────────────────
+        # ── 10. Handle failure with retry tracking ─────────────────────────────
         job.retry_count += 1
         job.error_message = str(exc)[:2000]  # cap at 2k chars
 
@@ -196,7 +243,6 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
                 error=str(exc),
             )
         else:
-            # Back to pending so it can be retried
             job.status = AIJobStatus.pending
             logger.warning(
                 "ai_job_failed_will_retry",
@@ -215,15 +261,11 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
         }
 
 
-# ── ARQ task entry point ───────────────────────────────────────────────────────
-
 async def process_ai_job(ctx: dict, ai_job_id: str) -> dict:
     """
     ARQ task: process a single AI job.
 
     ctx must contain 'db_session_factory' (set in WorkerSettings.on_startup).
-    This wrapper creates a fresh DB session per job and delegates to
-    _process_ai_job_inner for testability.
     """
     db_factory = ctx.get("db_session_factory")
     if db_factory is None:
@@ -232,3 +274,30 @@ async def process_ai_job(ctx: dict, ai_job_id: str) -> dict:
 
     async with db_factory() as db:
         return await _process_ai_job_inner(db, ai_job_id)
+
+
+# ── Knowledge Ingestion (Phase 3) ─────────────────────────────────────────────
+
+async def _process_knowledge_ingestion_inner(db: AsyncSession, file_id: str) -> dict:
+    """
+    Core ingestion logic for a single knowledge file.
+    Testable without a running Redis/ARQ instance.
+    """
+    from app.services.knowledge_service import ingest_knowledge_file
+    file_uuid = uuid.UUID(file_id)
+    return await ingest_knowledge_file(db, file_uuid)
+
+
+async def process_knowledge_ingestion(ctx: dict, file_id: str) -> dict:
+    """
+    ARQ task: ingest a knowledge file (extract → chunk → embed → store).
+
+    ctx must contain 'db_session_factory'.
+    """
+    db_factory = ctx.get("db_session_factory")
+    if db_factory is None:
+        logger.error("worker_missing_db_factory", file_id=file_id)
+        return {"status": "error", "reason": "no_db_factory"}
+
+    async with db_factory() as db:
+        return await _process_knowledge_ingestion_inner(db, file_id)

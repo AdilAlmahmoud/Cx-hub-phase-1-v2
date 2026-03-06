@@ -40,13 +40,26 @@ class Settings(BaseSettings):
     AI_QUEUE_ENABLED: bool = True
 
     # ── Phase 2: AI Provider ───────────────────────────────────────────────────
-    # "mock" uses the built-in deterministic mock (no API key needed).
-    # "openai" stub is present but not fully implemented in this phase.
     AI_PROVIDER: str = "mock"
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_MODEL: str = "gpt-4o-mini"
     AI_MAX_RETRIES: int = 3
     AI_JOB_TIMEOUT_SECONDS: int = 300
+
+    # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
+    # Local filesystem path where uploaded knowledge files are stored.
+    # Map this to a Docker volume in production.
+    KNOWLEDGE_STORAGE_PATH: str = "./data/knowledge"
+    # Embedding provider: "mock" or "openai"
+    EMBEDDING_PROVIDER: str = "mock"
+    # OpenAI model used for embeddings (only when EMBEDDING_PROVIDER=openai)
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+    # Embedding vector dimensions (must match the model; 1536 for ada-002 / 3-small)
+    EMBEDDING_DIMENSIONS: int = 1536
+    # Text chunk size in characters for ingestion pipeline
+    KNOWLEDGE_CHUNK_SIZE: int = 1000
+    # Overlap between consecutive chunks in characters
+    KNOWLEDGE_CHUNK_OVERLAP: int = 100
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

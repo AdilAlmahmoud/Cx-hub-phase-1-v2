@@ -1,8 +1,8 @@
-# CX Agent Hub — Phase 2 Backend
+# CX Agent Hub — Phase 3 Backend
 
 Multi-tenant AI-powered customer service platform backend.
-Phase 2 adds the asynchronous AI decision engine, Redis job queue, and structured AI result
-persistence on top of the Phase 1 multi-tenant foundation.
+Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, vector embeddings
+(pgvector), and file ingestion on top of the Phase 1+2 foundation.
 
 ---
 
@@ -15,11 +15,13 @@ persistence on top of the Phase 1 multi-tenant foundation.
 5. [API Documentation](#api-documentation)
 6. [Channel Adapter Architecture](#channel-adapter-architecture)
 7. [AI Decision Engine](#ai-decision-engine)
-8. [Testing](#testing)
-9. [Seed Data](#seed-data)
-10. [Phase 1 Deliverables](#phase-1-deliverables)
-11. [Phase 2 Deliverables](#phase-2-deliverables)
-12. [Deferred to Future Phases](#deferred-to-future-phases)
+8. [Knowledge Base & RAG](#knowledge-base--rag)
+9. [Testing](#testing)
+10. [Seed Data](#seed-data)
+11. [Phase 1 Deliverables](#phase-1-deliverables)
+12. [Phase 2 Deliverables](#phase-2-deliverables)
+13. [Phase 3 Deliverables](#phase-3-deliverables)
+14. [Deferred to Future Phases](#deferred-to-future-phases)
 
 ---
 
@@ -38,11 +40,16 @@ persistence on top of the Phase 1 multi-tenant foundation.
 │  │  WebChat  ──┼──► UnifiedEvent ──► InboundService        │    │
 │  │  SMS      ──┘          │                                │    │
 │  └────────────────────────┼────────────────────────────────┘    │
-│                           │ (Phase 2) ai_enabled=True           │
+│                           │ ai_enabled=True                     │
 │  ┌────────────────────────▼────────────────────────────────┐    │
 │  │  AI Job Queue (ARQ / Redis)                              │    │
 │  │  create AIJob ──► enqueue ──► Worker picks up           │    │
 │  └─────────────────────────────────────────────────────────┘    │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Knowledge Base API  (Phase 3)                           │   │
+│  │  POST /upload ──► save to disk ──► enqueue ingestion     │   │
+│  │  GET /knowledge  |  GET /knowledge/{id}  |  /reindex     │   │
+│  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Domain API (tenants / users / customers /               │   │
 │  │              conversations / tickets / ai-jobs)           │   │
@@ -51,12 +58,19 @@ persistence on top of the Phase 1 multi-tenant foundation.
 └──────────────────────────────┬──────────────────────────────────┘
                                │ SQLAlchemy async
 ┌──────────────────────────────▼──────────────────────────────────┐
-│                     PostgreSQL 16                                │
+│              PostgreSQL 16 + pgvector extension                  │
+│  knowledge_files | knowledge_chunks (vector(1536))               │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
 │  AI Worker (separate process — ARQ)                             │
-│  Redis ──► process_ai_job ──► AIDecisionEngine ──► AIResult DB  │
+│                                                                 │
+│  process_ai_job:                                                │
+│    embed query ──► retrieve top-k chunks ──► inject into LLM   │
+│    AIDecisionEngine ──► AIResult DB                             │
+│                                                                 │
+│  process_knowledge_ingestion:  (Phase 3)                        │
+│    extract text ──► chunk ──► embed ──► store vectors in DB     │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -66,6 +80,7 @@ persistence on top of the Phase 1 multi-tenant foundation.
 - **Async AI pipeline** — inbound messages enqueue an AI job and return 202 immediately; the worker processes jobs independently
 - **Idempotent worker** — re-processing the same job ID is safe; completed jobs are skipped
 - **Policy-driven AI** — per-tenant settings (language, tone, confidence threshold, auto-send mode) control AI behaviour
+- **RAG (Phase 3)** — query embedding → pgvector cosine similarity → top-k chunks injected into LLM system prompt
 - **API-first** — paginated responses and clean DTOs ready for a frontend dashboard
 
 ---
@@ -77,36 +92,45 @@ cx-agent-hub/
 ├── app/
 │   ├── main.py              # FastAPI app + CORS + lifespan (queue init)
 │   ├── core/
-│   │   ├── config.py        # Settings from environment variables (incl. Phase 2)
-│   │   ├── database.py      # Async SQLAlchemy engine + session
+│   │   ├── config.py        # Settings from environment variables (incl. Phase 2+3)
+│   │   ├── database.py      # Async SQLAlchemy engine + pgvector codec registration
 │   │   ├── queue.py         # ARQ Redis pool — init/close/enqueue helpers
 │   │   ├── security.py      # Password hashing + JWT (stdlib only)
+│   │   ├── storage.py       # [Phase 3] File I/O, text extraction, chunking
 │   │   └── logging.py       # Structured JSON logging (structlog)
 │   ├── models/              # SQLAlchemy ORM models
-│   │   ├── tenant.py        # Tenant, TenantConfig (+ Phase 2 AI policy), ChannelConfig
+│   │   ├── tenant.py        # Tenant, TenantConfig (+ AI policy + knowledge config), ChannelConfig
 │   │   ├── user.py          # User (owner / agent roles)
 │   │   ├── customer.py      # Customer (per-tenant, per-channel)
 │   │   ├── conversation.py  # Conversation
 │   │   ├── ticket.py        # Ticket
 │   │   ├── event_log.py     # UnifiedEvent persistence
 │   │   ├── ai_job.py        # AIJob (pending→processing→completed|failed)
-│   │   └── ai_result.py     # AIResult (structured AI decision output)
+│   │   ├── ai_result.py     # AIResult (structured AI decision output)
+│   │   └── knowledge.py     # [Phase 3] KnowledgeFile, KnowledgeChunk (vector embeddings)
 │   ├── schemas/             # Pydantic DTOs (request / response)
-│   │   ├── ai_job.py        # AIJobResponse, AIJobRetryResponse
-│   │   └── ai_result.py     # AIResultResponse
+│   │   ├── ai_job.py
+│   │   ├── ai_result.py     # Now includes retrieved_chunk_ids
+│   │   ├── knowledge.py     # [Phase 3] KnowledgeFileResponse, KnowledgeUploadResponse, etc.
+│   │   └── tenant.py        # Includes knowledge_enabled, retrieval_top_k
 │   ├── ai/                  # AI provider abstraction layer
-│   │   ├── base.py          # AIProcessingContext, AIDecisionResult, BaseAIProvider
+│   │   ├── base.py          # AIProcessingContext, AIDecisionResult, BaseAIProvider, RetrievedChunk
 │   │   ├── engine.py        # AIDecisionEngine (policy enforcement)
-│   │   ├── mock_provider.py # Deterministic mock (keyword-based, no API key needed)
-│   │   └── openai_provider.py # OpenAI stub (Phase 3+)
+│   │   ├── mock_provider.py # Deterministic mock (keyword-based + RAG snippet injection)
+│   │   └── openai_provider.py # [Phase 3] Full OpenAI Chat Completions integration + RAG
+│   ├── embeddings/          # [Phase 3] Embedding provider abstraction
+│   │   ├── base.py          # BaseEmbeddingProvider ABC
+│   │   ├── mock_provider.py # Deterministic mock (SHA-256 seeded unit-length vectors)
+│   │   └── openai_provider.py # OpenAI text-embedding-3-small + get_embedding_provider() factory
 │   ├── adapters/            # Channel adapter layer
-│   │   ├── base.py          # UnifiedEvent model + BaseChannelAdapter
+│   │   ├── base.py
 │   │   ├── whatsapp.py
 │   │   ├── webchat.py
 │   │   └── sms.py
 │   ├── services/            # Business logic
-│   │   ├── inbound_service.py  # Orchestrates inbound pipeline + AI job creation
-│   │   ├── ai_job_service.py   # AIJob + AIResult CRUD (tenant-scoped)
+│   │   ├── inbound_service.py
+│   │   ├── ai_job_service.py
+│   │   ├── knowledge_service.py # [Phase 3] Ingestion pipeline + vector retrieval
 │   │   ├── tenant_service.py
 │   │   ├── user_service.py
 │   │   ├── customer_service.py
@@ -114,36 +138,42 @@ cx-agent-hub/
 │   │   └── ticket_service.py
 │   ├── worker/
 │   │   ├── main.py          # ARQ WorkerSettings (run: python -m app.worker.main)
-│   │   └── tasks.py         # process_ai_job task + _process_ai_job_inner (testable)
+│   │   └── tasks.py         # process_ai_job + process_knowledge_ingestion [Phase 3]
 │   └── api/v1/              # REST API routes
-│       ├── auth/            # Login, /me
-│       ├── tenants/         # Tenant CRUD + config (incl. AI policy)
-│       ├── users/           # User management
-│       ├── customers/       # Customer management
-│       ├── conversations/   # Conversations + event history
-│       ├── tickets/         # Ticket management + /ai-result sub-resource
-│       ├── channels/        # Inbound webhook endpoints
-│       └── ai_jobs/         # AI job list / get / result / retry
+│       ├── auth/
+│       ├── tenants/
+│       ├── users/
+│       ├── customers/
+│       ├── conversations/
+│       ├── tickets/
+│       ├── channels/
+│       ├── ai_jobs/
+│       └── knowledge/       # [Phase 3] Upload, list, get, reindex
 ├── migrations/              # Alembic migrations
 │   └── versions/
 │       ├── 001_initial_schema.py
-│       └── 002_phase2_ai_tables.py  # ai_jobs, ai_results + tenant AI policy columns
+│       ├── 002_phase2_ai_tables.py
+│       └── 003_phase3_knowledge.py  # [Phase 3] knowledge_files, knowledge_chunks, pgvector
 ├── tests/
 │   ├── unit/
-│   │   ├── test_adapters.py      # Channel adapter normalisation
-│   │   ├── test_security.py      # JWT + password hashing
-│   │   ├── test_ai_engine.py     # Mock provider + engine policy enforcement
-│   │   └── test_ai_worker.py     # Worker task (in-memory SQLite, no Redis)
+│   │   ├── test_adapters.py
+│   │   ├── test_security.py
+│   │   ├── test_ai_engine.py
+│   │   ├── test_ai_worker.py
+│   │   └── test_knowledge.py  # [Phase 3] chunking, extraction, embeddings, ingestion, RAG
 │   └── integration/
 │       ├── test_health.py
 │       ├── test_auth.py
 │       ├── test_inbound_channels.py
 │       ├── test_tenant_isolation.py
-│       └── test_ai_jobs.py       # Full AI pipeline + API + multi-tenant isolation
+│       ├── test_ai_jobs.py
+│       └── test_knowledge_api.py  # [Phase 3] Upload, list, reindex, RBAC, isolation, AI+RAG
 ├── scripts/
-│   └── seed.py              # Demo tenant seed data
+│   └── seed.py
+├── data/
+│   └── knowledge/           # [Phase 3] Mounted Docker volume for uploaded knowledge files
 ├── Dockerfile
-├── docker-compose.yml       # db + redis + migrate + seed + api + worker
+├── docker-compose.yml       # pgvector image + knowledge_data volume
 ├── .env.example
 └── requirements.txt
 ```
@@ -192,12 +222,12 @@ docker compose up --build
 
 Docker Desktop will:
 1. Build the FastAPI + worker image
-2. Start PostgreSQL (port `5432`)
+2. Start PostgreSQL with **pgvector** extension (port `5432`)
 3. Start Redis (port `6379`)
-4. Run Alembic migrations automatically (Phase 1 + Phase 2 tables)
+4. Run Alembic migrations automatically (Phase 1 + Phase 2 + Phase 3 tables including `knowledge_files`, `knowledge_chunks`, and `vector(1536)` column)
 5. Seed the demo tenant
 6. Start the FastAPI API on port `8000`
-7. Start the AI worker process (polls Redis for AI jobs)
+7. Start the AI worker process (polls Redis for AI jobs and ingestion jobs)
 
 > First startup may take 2–3 minutes while Docker pulls images and builds.
 
@@ -220,35 +250,54 @@ Invoke-WebRequest -Uri http://localhost:8000/api/v1/auth/login `
   Select-Object -ExpandProperty Content
 ```
 
-### Step 6 — Enable AI for the demo tenant
-
-Once logged in, enable AI processing via the config endpoint:
+### Step 6 — Enable AI + Knowledge Base
 
 ```powershell
 # Replace <TOKEN> with the JWT from the login response
 $headers = @{ Authorization = "Bearer <TOKEN>"; "Content-Type" = "application/json" }
-$body = '{"ai_enabled": true, "auto_send_mode": "supervised", "confidence_threshold": 0.7}'
+$body = '{"ai_enabled": true, "knowledge_enabled": true, "retrieval_top_k": 3, "auto_send_mode": "supervised"}'
 Invoke-WebRequest -Uri http://localhost:8000/api/v1/tenants/me/config `
   -Method PUT -Headers $headers -Body $body |
   Select-Object -ExpandProperty Content
 ```
 
-### Step 7 — Send a test inbound message and check AI result
+### Step 7 — Upload a knowledge file
 
 ```powershell
-# Send inbound message
+# Upload a .txt knowledge file
+$headers_no_ct = @{ Authorization = "Bearer <TOKEN>" }
+$filePath = "C:\path\to\your\knowledge.txt"
+$fileBytes = [System.IO.File]::ReadAllBytes($filePath)
+$boundary = "----FormBoundary$(Get-Random)"
+$bodyLines = @(
+    "--$boundary",
+    'Content-Disposition: form-data; name="file"; filename="knowledge.txt"',
+    "Content-Type: text/plain",
+    "",
+    [System.Text.Encoding]::UTF8.GetString($fileBytes),
+    "--$boundary--"
+)
+$bodyContent = $bodyLines -join "`r`n"
+Invoke-WebRequest -Uri http://localhost:8000/api/v1/knowledge/upload `
+  -Method POST `
+  -Headers @{ Authorization = "Bearer <TOKEN>"; "Content-Type" = "multipart/form-data; boundary=$boundary" } `
+  -Body ([System.Text.Encoding]::UTF8.GetBytes($bodyContent)) |
+  Select-Object -ExpandProperty Content
+# Returns: {"file_id": "...", "status": "pending", "original_filename": "knowledge.txt", ...}
+# The worker ingests it asynchronously (extract → chunk → embed → store)
+```
+
+### Step 8 — Send a message and check AI result with RAG
+
+```powershell
+# Send inbound message (worker will retrieve knowledge chunks and include them in the AI reply)
 $body = '{"from":"+15551234567","type":"text","text":{"body":"Hello I need help"},"message_id":"test-001"}'
 $resp = Invoke-WebRequest -Uri http://localhost:8000/api/v1/inbound/whatsapp/demo-corp `
   -Method POST -ContentType "application/json" -Body $body |
   Select-Object -ExpandProperty Content
-# Note the ai_job_id in the response
-
-# Check AI job status (worker processes it within seconds)
 $jobId = ($resp | ConvertFrom-Json).ai_job_id
-Invoke-WebRequest -Uri "http://localhost:8000/api/v1/ai/jobs/$jobId" `
-  -Headers $headers | Select-Object -ExpandProperty Content
 
-# Get the AI decision result
+# Check AI job result (includes retrieved_chunk_ids when RAG was used)
 Invoke-WebRequest -Uri "http://localhost:8000/api/v1/ai/jobs/$jobId/result" `
   -Headers $headers | Select-Object -ExpandProperty Content
 ```
@@ -265,7 +314,7 @@ docker compose logs worker --follow
 # Stop all services
 docker compose down
 
-# Stop and remove volumes (wipes database and Redis)
+# Stop and remove volumes (wipes database, Redis, and knowledge files)
 docker compose down -v
 
 # Re-run migrations only
@@ -299,11 +348,18 @@ docker compose run --rm api python -m pytest tests/ -v
 | **Phase 2** | | |
 | `REDIS_URL` | `redis://redis:6379` | Redis connection URL for the job queue |
 | `AI_QUEUE_ENABLED` | `true` | Set `false` to disable queue (jobs stay pending) |
-| `AI_PROVIDER` | `mock` | AI provider: `mock` or `openai` (stub) |
-| `OPENAI_API_KEY` | _(none)_ | OpenAI key (required only if `AI_PROVIDER=openai`) |
-| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI model name |
+| `AI_PROVIDER` | `mock` | AI provider: `mock` or `openai` |
+| `OPENAI_API_KEY` | _(none)_ | OpenAI key (required if `AI_PROVIDER=openai`) |
+| `OPENAI_MODEL` | `gpt-4o-mini` | OpenAI chat model name |
 | `AI_MAX_RETRIES` | `3` | Max retry attempts per AI job |
 | `AI_JOB_TIMEOUT_SECONDS` | `300` | Worker job timeout |
+| **Phase 3** | | |
+| `KNOWLEDGE_STORAGE_PATH` | `./data/knowledge` | Local filesystem path for uploaded files (mount as Docker volume) |
+| `EMBEDDING_PROVIDER` | `mock` | Embedding provider: `mock` or `openai` |
+| `OPENAI_EMBEDDING_MODEL` | `text-embedding-3-small` | OpenAI embedding model |
+| `EMBEDDING_DIMENSIONS` | `1536` | Vector dimensions (must match the model) |
+| `KNOWLEDGE_CHUNK_SIZE` | `1000` | Max characters per knowledge chunk |
+| `KNOWLEDGE_CHUNK_OVERLAP` | `100` | Overlap characters between consecutive chunks |
 
 ---
 
@@ -324,22 +380,27 @@ When the server is running, full interactive documentation is at:
 | `GET` | `/api/v1/auth/me` | Bearer | Current user info |
 | `GET` | `/api/v1/tenants` | owner | List all tenants |
 | `GET` | `/api/v1/tenants/me` | any | Current tenant details |
-| `PUT` | `/api/v1/tenants/me/config` | owner | Update tenant config (incl. AI policy) |
+| `PUT` | `/api/v1/tenants/me/config` | owner | Update tenant config (AI policy + knowledge settings) |
 | `GET` | `/api/v1/users` | agent+ | List users in tenant |
 | `POST` | `/api/v1/users` | owner | Create user |
-| `GET` | `/api/v1/customers` | agent+ | List customers (paginated, filterable) |
+| `GET` | `/api/v1/customers` | agent+ | List customers (paginated) |
 | `GET` | `/api/v1/conversations` | agent+ | List conversations |
 | `GET` | `/api/v1/conversations/{id}/events` | agent+ | Conversation message history |
 | `GET` | `/api/v1/tickets` | agent+ | List tickets (paginated, filterable) |
-| `PATCH` | `/api/v1/tickets/{id}` | agent+ | Update ticket (status, priority, assign) |
-| `GET` | `/api/v1/tickets/{id}/ai-result` | agent+ | **[Phase 2]** AI decision result for a ticket |
+| `PATCH` | `/api/v1/tickets/{id}` | agent+ | Update ticket |
+| `GET` | `/api/v1/tickets/{id}/ai-result` | agent+ | AI decision result for a ticket |
 | `POST` | `/api/v1/inbound/whatsapp/{slug}` | None | Receive WhatsApp message |
 | `POST` | `/api/v1/inbound/webchat/{slug}` | None | Receive web chat message |
 | `POST` | `/api/v1/inbound/sms/{slug}` | None | Receive SMS message |
-| `GET` | `/api/v1/ai/jobs` | agent+ | **[Phase 2]** List AI jobs (filterable by status/ticket) |
-| `GET` | `/api/v1/ai/jobs/{id}` | agent+ | **[Phase 2]** Get AI job status |
-| `GET` | `/api/v1/ai/jobs/{id}/result` | agent+ | **[Phase 2]** Get AI decision result |
-| `POST` | `/api/v1/ai/jobs/{id}/retry` | agent+ | **[Phase 2]** Retry a failed AI job |
+| `GET` | `/api/v1/ai/jobs` | agent+ | List AI jobs |
+| `GET` | `/api/v1/ai/jobs/{id}` | agent+ | Get AI job status |
+| `GET` | `/api/v1/ai/jobs/{id}/result` | agent+ | Get AI decision result (includes `retrieved_chunk_ids`) |
+| `POST` | `/api/v1/ai/jobs/{id}/retry` | agent+ | Retry a failed AI job |
+| **Phase 3** | | | |
+| `POST` | `/api/v1/knowledge/upload` | owner | Upload a knowledge file (.txt, .md, .pdf) — returns 202 |
+| `GET` | `/api/v1/knowledge` | agent+ | List knowledge files (paginated, filterable by status) |
+| `GET` | `/api/v1/knowledge/{id}` | agent+ | Get knowledge file details |
+| `POST` | `/api/v1/knowledge/{id}/reindex` | owner | Re-trigger ingestion for a knowledge file |
 
 All list endpoints support `?page=1&page_size=20` pagination.
 
@@ -350,16 +411,15 @@ All list endpoints support `?page=1&page_size=20` pagination.
 Each inbound channel has a dedicated **adapter** that normalises the raw webhook payload into a `UnifiedEvent`:
 
 ```python
-# app/adapters/base.py
 class UnifiedEvent(BaseModel):
-    event_id: str          # unique per event
-    tenant_id: str         # owning tenant
+    event_id: str
+    tenant_id: str
     channel: ChannelType   # whatsapp | webchat | sms
-    external_user_identifier: str  # sender ID (phone, session ID, etc.)
+    external_user_identifier: str
     message_text: str | None
     timestamp: datetime
-    raw_payload: dict | None      # original payload preserved
-    metadata: dict | None         # channel-specific metadata
+    raw_payload: dict | None
+    metadata: dict | None
 ```
 
 To add a new channel (e.g. Telegram):
@@ -368,8 +428,6 @@ To add a new channel (e.g. Telegram):
 2. Implement the `normalize()` method
 3. Add a `ChannelType.telegram` enum value
 4. Register it in `app/api/v1/channels/router.py`
-
-The rest of the pipeline (customer/conversation/ticket creation, event logging, AI job creation) requires no changes.
 
 ---
 
@@ -381,7 +439,7 @@ When a tenant has `ai_enabled=True`, every inbound message triggers:
 
 1. **AIJob creation** (status: `pending`) — persisted in DB before the queue call
 2. **Enqueue** via ARQ to Redis — fire-and-forget; inbound response is not blocked
-3. **Worker picks up** the job, runs `AIDecisionEngine.process(context)`
+3. **Worker picks up** the job, optionally retrieves RAG chunks (Phase 3), then runs `AIDecisionEngine.process(context)`
 4. **AIResult persisted** — structured decision output stored in DB
 
 ```
@@ -396,31 +454,38 @@ InboundService.process()
       |                                               |
       +-----------------------------------------------> Worker
                                                        |
-                                               AIDecisionEngine
+                                               [Phase 3] knowledge_enabled=True?
+                                               embed query --> retrieve top-k chunks
                                                        |
-                                               MockAIProvider
-                                               (or real provider)
+                                               AIDecisionEngine (inject chunks into context)
                                                        |
-                                               AIResult persisted
+                                               MockAIProvider / OpenAIProvider
+                                                       |
+                                               AIResult persisted (with retrieved_chunk_ids)
                                                AIJob --> completed
 ```
 
 ### AI Provider abstraction
 
-All providers implement `BaseAIProvider` from `app/ai/base.py`:
+All providers implement `BaseAIProvider`:
 
 ```python
 class BaseAIProvider(ABC):
-    @property
-    @abstractmethod
-    def provider_name(self) -> str: ...
-
     @abstractmethod
     async def generate_decision(self, context: AIProcessingContext) -> AIDecisionResult: ...
 
     @abstractmethod
     async def health_check(self) -> bool: ...
 ```
+
+### OpenAI Provider (Phase 3)
+
+Set `AI_PROVIDER=openai` and `OPENAI_API_KEY=sk-...` to enable real LLM integration.
+
+The provider:
+- Calls `client.chat.completions.create` with `response_format={"type": "json_object"}`
+- Injects retrieved knowledge chunks into the system prompt (up to 5 excerpts)
+- Returns structured JSON with `intent`, `answer`, `confidence`, `should_escalate`, `risk_flags`
 
 ### Mock Provider (default)
 
@@ -455,6 +520,8 @@ Configure per-tenant AI behaviour via `PUT /api/v1/tenants/me/config`:
 | `auto_send_mode` | `"off"` | `"off"` / `"supervised"` / `"auto"` |
 | `escalation_keywords` | `null` | List of keywords that always trigger escalation |
 | `handoff_message_template` | `null` | Template sent when handing off to human agent |
+| `knowledge_enabled` | `false` | **[Phase 3]** Enable RAG retrieval for AI jobs |
+| `retrieval_top_k` | `3` | **[Phase 3]** Number of knowledge chunks to inject (1–20) |
 
 **auto_send_mode values:**
 
@@ -464,42 +531,98 @@ Configure per-tenant AI behaviour via `PUT /api/v1/tenants/me/config`:
 | `"supervised"` | Draft is present; human reviews before sending |
 | `"auto"` | `safe_to_auto_send=true` when `confidence >= confidence_threshold` (not escalating) |
 
-> **Phase 2 note:** `safe_to_auto_send=true` is computed and stored but outbound sending is deferred to a later phase.
-
 ### AIResult fields
 
 | Field | Description |
 |---|---|
 | `intent` | Detected intent label |
-| `answer` | Draft reply candidate (not sent in Phase 2) |
+| `answer` | Draft reply candidate |
 | `confidence` | Provider confidence score (0.0–1.0) |
 | `should_escalate` | True if a human agent must handle this |
-| `risk_flags` | List of risk indicators (e.g. `"escalation_intent:complaint"`) |
+| `risk_flags` | List of risk indicators |
 | `escalation_reason` | Human-readable reason for escalation |
 | `safe_to_auto_send` | True if policy allows automatic sending |
 | `processing_notes` | Provider debug notes |
 | `provider_name` | AI provider used (`"mock"`, `"openai"`, ...) |
 | `model_name` | Model version identifier |
 | `processing_duration_ms` | Processing time in milliseconds |
+| `retrieved_chunk_ids` | **[Phase 3]** IDs of knowledge chunks used in the answer |
 
-### Job lifecycle
+---
+
+## Knowledge Base & RAG
+
+### Overview
+
+Phase 3 adds a full **Retrieval-Augmented Generation (RAG)** pipeline:
 
 ```
-pending --> processing --> completed
-                     \--> failed (after max_retries)
+Owner uploads file
+        |
+        v
+POST /api/v1/knowledge/upload
+        |
+        +---> save bytes to disk (content-hash filename)
+        +---> create KnowledgeFile record (status=pending)
+        +---> enqueue process_knowledge_ingestion job (202 returned immediately)
+                        |
+                Worker picks up:
+                        |
+                1. extract_text()    (.txt/.md read directly; .pdf via pypdf)
+                2. chunk_text()      (character-level, configurable size + overlap)
+                3. embed_batch()     (OpenAI text-embedding-3-small or mock)
+                4. delete old chunks (safe re-ingestion)
+                5. insert new KnowledgeChunks with vector(1536) embeddings
+                6. KnowledgeFile.status = "ready"
+
+On each inbound AI job (knowledge_enabled=True):
+        |
+        +---> embed_text(message_text)      (same embedding provider)
+        +---> retrieve_similar_chunks()     (pgvector <=> cosine distance, top-k)
+        +---> attach RetrievedChunk list to AIProcessingContext
+        +---> LLM system prompt includes [Excerpt 1], [Excerpt 2], ... from KB
+        +---> AIResult.retrieved_chunk_ids = [chunk_uuid, ...]
 ```
 
-Failed jobs can be reset via `POST /api/v1/ai/jobs/{id}/retry`.
+### Knowledge file lifecycle
+
+```
+pending --> ingesting --> ready
+                    \--> failed (error_message stored)
+```
+
+Re-ingest a failed or outdated file via `POST /knowledge/{id}/reindex`.
+
+### Embedding provider
+
+| `EMBEDDING_PROVIDER` | Description |
+|---|---|
+| `mock` (default) | Deterministic 1536-dim unit vectors (SHA-256 seeded). No API key needed. Suitable for tests and development. |
+| `openai` | Calls OpenAI `embeddings.create` API. Requires `OPENAI_API_KEY`. Supports batching. |
+
+### Supported file types
+
+| Extension | MIME type | Extraction method |
+|---|---|---|
+| `.txt` / `.md` / `.text` | `text/plain`, `text/markdown` | Read as UTF-8 |
+| `.pdf` | `application/pdf` | pypdf (pure Python, no system deps) |
+
+Maximum upload size: **20 MB** per file.
+
+### Tenant isolation
+
+All knowledge data is scoped to `tenant_id`. Tenants cannot see or access each other's files.
+The IVFFlat index on `knowledge_chunks.embedding` ensures fast ANN search per tenant at scale.
 
 ---
 
 ## Testing
 
 ```bash
-# All tests (142 tests)
+# All tests (192 tests, 1 skipped)
 python -m pytest tests/ -v
 
-# Unit tests only (no DB, no Redis, no external services)
+# Unit tests only
 python -m pytest tests/unit/ -v
 
 # Integration tests (uses in-memory SQLite)
@@ -519,19 +642,33 @@ python -m pytest tests/ --cov=app --cov-report=term-missing
 - Mock AI provider (all auto_send_mode combinations)
 - AI decision engine (policy enforcement, provider error propagation)
 - Worker task (idempotency, retry logic, result persistence)
+- **[Phase 3]** `chunk_text` — empty, single chunk, overlap, boundary splitting
+- **[Phase 3]** `extract_text` — .txt, .md, unsupported extension, missing file
+- **[Phase 3]** Mock embedding provider — determinism, unit length, batch, health check
+- **[Phase 3]** `get_embedding_provider` factory — defaults to mock
+- **[Phase 3]** Ingestion pipeline — full flow, already-ready skips, not-found, bad path → failed
+- **[Phase 3]** AI engine with RAG — chunks injected into answer, escalation ignores RAG, chunk_ids tracked
+- **[Phase 3]** Knowledge retrieval fallback — graceful empty list on SQLite (no pgvector)
+- **[Phase 3]** Knowledge worker task — `_process_knowledge_ingestion_inner` success and not-found paths
 
 *Integration tests:*
 - Multi-tenant data isolation (customers, conversations, tickets, users, AI jobs)
 - RBAC enforcement (agent vs owner)
 - Inbound channel pipeline (entity creation, conversation reuse)
 - AI job creation when `ai_enabled=True`
-- AI job NOT created when `ai_enabled=False`
 - Worker processing → AIResult in DB
-- AI Jobs API (`GET /ai/jobs`, `GET /ai/jobs/{id}`, `GET /ai/jobs/{id}/result`, retry)
-- Ticket AI result sub-resource (`GET /tickets/{id}/ai-result`)
-- Cross-tenant AI job isolation (404 for wrong tenant)
+- AI Jobs API (list, get, result, retry)
+- Ticket AI result sub-resource
+- Cross-tenant AI job isolation
 - Health/system endpoints
 - Authentication flows
+- **[Phase 3]** Knowledge upload (owner only, 202 accepted)
+- **[Phase 3]** Unsupported extension → 415; empty file → 400
+- **[Phase 3]** Knowledge list and get detail (agent can read)
+- **[Phase 3]** Reindex (owner only, resets to pending)
+- **[Phase 3]** Tenant isolation (tenant B cannot see/access tenant A's files)
+- **[Phase 3]** AI job completes with `knowledge_enabled=True` (RAG fallback on SQLite)
+- **[Phase 3]** Tenant config `knowledge_enabled` + `retrieval_top_k` CRUD + validation
 
 ---
 
@@ -594,18 +731,48 @@ python -m scripts.seed
 | 5 | Database migration 002 (ai_jobs, ai_results, AI policy columns) | ✅ |
 | 6 | AI provider abstraction (`BaseAIProvider`, `AIProcessingContext`, `AIDecisionResult`) | ✅ |
 | 7 | Mock AI provider — deterministic keyword-based engine, no API key | ✅ |
-| 8 | OpenAI provider stub (Phase 3+ implementation) | ✅ |
-| 9 | AI decision engine with tenant policy enforcement | ✅ |
-| 10 | Inbound pipeline integration — AI job created + enqueued on `ai_enabled=True` | ✅ |
-| 11 | Tenant AI configuration (language, tone, threshold, auto_send_mode, keywords) | ✅ |
-| 12 | Structured logging for all AI job events | ✅ |
-| 13 | AI Jobs API (`/ai/jobs` — list, get, result, retry) | ✅ |
-| 14 | Ticket AI result sub-resource (`/tickets/{id}/ai-result`) | ✅ |
-| 15 | Worker service in docker-compose.yml | ✅ |
-| 16 | Idempotent worker task (safe to re-run, retry tracking) | ✅ |
-| 17 | Unit tests — AI engine, mock provider, worker task | ✅ |
-| 18 | Integration tests — AI job pipeline, API endpoints, tenant isolation | ✅ |
-| 19 | README updated for Phase 2 | ✅ |
+| 8 | AI decision engine with tenant policy enforcement | ✅ |
+| 9 | Inbound pipeline integration — AI job created + enqueued on `ai_enabled=True` | ✅ |
+| 10 | Tenant AI configuration (language, tone, threshold, auto_send_mode, keywords) | ✅ |
+| 11 | Structured logging for all AI job events | ✅ |
+| 12 | AI Jobs API (`/ai/jobs` — list, get, result, retry) | ✅ |
+| 13 | Ticket AI result sub-resource (`/tickets/{id}/ai-result`) | ✅ |
+| 14 | Worker service in docker-compose.yml | ✅ |
+| 15 | Idempotent worker task (safe to re-run, retry tracking) | ✅ |
+| 16 | Unit tests — AI engine, mock provider, worker task | ✅ |
+| 17 | Integration tests — AI job pipeline, API endpoints, tenant isolation | ✅ |
+| 18 | README updated for Phase 2 | ✅ |
+
+---
+
+## Phase 3 Deliverables
+
+| # | Deliverable | Status |
+|---|---|---|
+| 1 | `KnowledgeFile` + `KnowledgeChunk` models (`app/models/knowledge.py`) | ✅ |
+| 2 | Alembic migration 003 — `knowledge_files`, `knowledge_chunks`, pgvector extension, IVFFlat index | ✅ |
+| 3 | File storage utilities — `save_upload`, `delete_file`, `extract_text`, `chunk_text` (`app/core/storage.py`) | ✅ |
+| 4 | Embedding provider abstraction — `BaseEmbeddingProvider`, `MockEmbeddingProvider`, `OpenAIEmbeddingProvider` | ✅ |
+| 5 | `get_embedding_provider()` factory — env-driven, defaults to mock | ✅ |
+| 6 | Knowledge service — `create_knowledge_file`, `ingest_knowledge_file`, `retrieve_similar_chunks` | ✅ |
+| 7 | pgvector cosine similarity retrieval with graceful SQLite fallback | ✅ |
+| 8 | Knowledge ingestion ARQ task — `process_knowledge_ingestion` | ✅ |
+| 9 | Knowledge API router — upload, list, get, reindex (`app/api/v1/knowledge/router.py`) | ✅ |
+| 10 | RBAC on knowledge endpoints (owner=upload/reindex, agent=read) | ✅ |
+| 11 | 20 MB file size limit + extension allowlist (.txt, .md, .pdf) | ✅ |
+| 12 | Tenant-scoped knowledge isolation (FK + query filter) | ✅ |
+| 13 | RAG integration in AI worker — embed query → top-k retrieval → inject into `AIProcessingContext` | ✅ |
+| 14 | RAG non-blocking — retrieval failure is caught and logged; AI job continues | ✅ |
+| 15 | `AIProcessingContext.retrieved_chunks` + `AIDecisionResult.retrieved_chunk_ids` | ✅ |
+| 16 | `AIResult.retrieved_chunk_ids` persisted in DB | ✅ |
+| 17 | OpenAI provider — full Chat Completions API with RAG prompt injection | ✅ |
+| 18 | Mock provider updated to incorporate retrieved chunks into answer | ✅ |
+| 19 | `TenantConfig.knowledge_enabled` + `TenantConfig.retrieval_top_k` | ✅ |
+| 20 | Docker: pgvector image, `knowledge_data` volume, Phase 3 env vars | ✅ |
+| 21 | `.env.example` updated with Phase 3 variables | ✅ |
+| 22 | Unit tests for all Phase 3 components (51 new tests) | ✅ |
+| 23 | Integration tests for Knowledge API, RBAC, tenant isolation, AI+RAG | ✅ |
+| 24 | README updated for Phase 3 | ✅ |
 
 ---
 
@@ -613,8 +780,6 @@ python -m scripts.seed
 
 | Feature | Notes |
 |---|---|
-| Real OpenAI / LLM integration | Stub present in `app/ai/openai_provider.py`; activate by setting `AI_PROVIDER=openai` + `OPENAI_API_KEY` |
-| RAG / knowledge base | Vector store + retrieval pipeline for grounded answers |
 | Outbound message sending | `safe_to_auto_send` flag is computed but sending is not yet implemented |
 | Real WhatsApp provider | Plug in Meta Cloud API or Twilio adapter |
 | Real SMS provider | Plug in Twilio, Vonage, or AWS SNS adapter |
@@ -624,3 +789,5 @@ python -m scripts.seed
 | Rate limiting | Redis-based per-tenant throttling |
 | Audit log | Track all state changes with actor |
 | Analytics API | Aggregated metrics per tenant |
+| Voice channel | IVR / telephony integration |
+| WebSocket push | Real-time dashboard updates |
