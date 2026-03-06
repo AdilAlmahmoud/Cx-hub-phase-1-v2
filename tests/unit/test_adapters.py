@@ -15,6 +15,7 @@ from app.adapters.base import ChannelType, UnifiedEvent
 from app.adapters.whatsapp import WhatsAppAdapter
 from app.adapters.webchat import WebChatAdapter
 from app.adapters.sms import SMSAdapter
+from app.adapters.email import EmailAdapter
 
 TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -250,6 +251,135 @@ class TestSMSAdapter:
         assert self.adapter.validate_payload(payload) is False
 
 
+# ── Email Adapter ─────────────────────────────────────────────────────────────
+
+class TestEmailAdapter:
+    def setup_method(self):
+        self.adapter = EmailAdapter()
+
+    def _payload(self, **kwargs):
+        base = {
+            "from": "sender@example.com",
+            "to": "support@tenant.com",
+            "subject": "Help needed",
+            "body": "Hi, I need help with my order.",
+            "message_id": "<abc123@mail.example.com>",
+            "timestamp": "2026-03-06T12:00:00Z",
+        }
+        base.update(kwargs)
+        return base
+
+    def test_normalizes_to_unified_event(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert isinstance(event, UnifiedEvent)
+
+    def test_channel_is_email(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.channel == ChannelType.email.value
+
+    def test_sender_email_extracted(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.external_user_identifier == "sender@example.com"
+
+    def test_display_name_stripped_from_from_field(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload(**{"from": "John Doe <john@example.com>"}))
+        assert event.external_user_identifier == "john@example.com"
+
+    def test_body_is_message_text(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.message_text == "Hi, I need help with my order."
+
+    def test_text_field_fallback(self):
+        payload = self._payload()
+        del payload["body"]
+        payload["text"] = "Plain text fallback"
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.message_text == "Plain text fallback"
+
+    def test_html_body_fallback(self):
+        payload = self._payload()
+        del payload["body"]
+        payload["html_body"] = "<p>HTML content</p>"
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.message_text == "<p>HTML content</p>"
+
+    def test_subject_fallback_when_no_body(self):
+        payload = {"from": "a@b.com", "subject": "Subject only", "timestamp": "2026-01-01T00:00:00Z"}
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.message_text == "Subject only"
+
+    def test_no_content_fallback(self):
+        payload = {"from": "a@b.com"}
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.message_text == "(no content)"
+
+    def test_iso_timestamp_parsed(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload(timestamp="2026-03-06T12:00:00Z"))
+        assert event.timestamp.year == 2026
+        assert event.timestamp.month == 3
+        assert event.timestamp.tzinfo is not None
+
+    def test_unix_timestamp_parsed(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload(timestamp=1700000000))
+        assert event.timestamp == datetime.fromtimestamp(1700000000, tz=timezone.utc)
+
+    def test_timestamp_defaults_when_missing(self):
+        payload = self._payload()
+        del payload["timestamp"]
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.timestamp is not None
+        assert event.timestamp.tzinfo is not None
+
+    def test_metadata_contains_message_id(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.metadata["message_id"] == "<abc123@mail.example.com>"
+
+    def test_metadata_contains_subject(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.metadata["subject"] == "Help needed"
+
+    def test_metadata_has_attachments_false(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.metadata["has_attachments"] is False
+
+    def test_metadata_has_attachments_true(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload(attachments=["file.pdf"]))
+        assert event.metadata["has_attachments"] is True
+
+    def test_metadata_in_reply_to(self):
+        event = self.adapter.normalize(
+            TENANT_ID,
+            self._payload(in_reply_to="<prev@mail.example.com>"),
+        )
+        assert event.metadata["in_reply_to"] == "<prev@mail.example.com>"
+
+    def test_metadata_thread_id(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload(thread_id="thread_xyz"))
+        assert event.metadata["thread_id"] == "thread_xyz"
+
+    def test_validate_payload_true_with_from(self):
+        assert self.adapter.validate_payload(self._payload()) is True
+
+    def test_validate_payload_false_without_from(self):
+        payload = self._payload()
+        del payload["from"]
+        assert self.adapter.validate_payload(payload) is False
+
+    def test_raw_payload_preserved(self):
+        payload = self._payload()
+        event = self.adapter.normalize(TENANT_ID, payload)
+        assert event.raw_payload == payload
+
+    def test_tenant_id_preserved(self):
+        event = self.adapter.normalize(TENANT_ID, self._payload())
+        assert event.tenant_id == TENANT_ID
+
+    def test_event_id_is_unique(self):
+        e1 = self.adapter.normalize(TENANT_ID, self._payload())
+        e2 = self.adapter.normalize(TENANT_ID, self._payload())
+        assert e1.event_id != e2.event_id
+
+
 # ── Cross-adapter normalization contract ──────────────────────────────────────
 
 class TestUnifiedEventContract:
@@ -268,6 +398,10 @@ class TestUnifiedEventContract:
             SMSAdapter(),
             {"from": "+111", "body": "hi"},
         ),
+        (
+            EmailAdapter(),
+            {"from": "a@b.com", "subject": "Hi", "body": "help"},
+        ),
     ])
     def test_required_fields_present(self, adapter, payload):
         event = adapter.normalize(TENANT_ID, payload)
@@ -281,6 +415,7 @@ class TestUnifiedEventContract:
         (WhatsAppAdapter(), {"from": "+111", "type": "text", "text": {"body": "hi"}, "message_id": "x"}),
         (WebChatAdapter(), {"session_id": "s1", "message": "hi"}),
         (SMSAdapter(), {"from": "+111", "body": "hi"}),
+        (EmailAdapter(), {"from": "a@b.com", "body": "hello"}),
     ])
     def test_channel_values_are_valid(self, adapter, payload):
         event = adapter.normalize(TENANT_ID, payload)

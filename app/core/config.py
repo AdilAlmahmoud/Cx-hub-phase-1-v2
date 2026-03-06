@@ -7,7 +7,7 @@ import secrets
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "CX Agent Hub"
-    APP_VERSION: str = "2.0.0"
+    APP_VERSION: str = "4.0.0"
     DEBUG: bool = False
     ENVIRONMENT: str = "production"
 
@@ -47,19 +47,18 @@ class Settings(BaseSettings):
     AI_JOB_TIMEOUT_SECONDS: int = 300
 
     # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
-    # Local filesystem path where uploaded knowledge files are stored.
-    # Map this to a Docker volume in production.
     KNOWLEDGE_STORAGE_PATH: str = "./data/knowledge"
-    # Embedding provider: "mock" or "openai"
     EMBEDDING_PROVIDER: str = "mock"
-    # OpenAI model used for embeddings (only when EMBEDDING_PROVIDER=openai)
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
-    # Embedding vector dimensions (must match the model; 1536 for ada-002 / 3-small)
     EMBEDDING_DIMENSIONS: int = 1536
-    # Text chunk size in characters for ingestion pipeline
     KNOWLEDGE_CHUNK_SIZE: int = 1000
-    # Overlap between consecutive chunks in characters
     KNOWLEDGE_CHUNK_OVERLAP: int = 100
+
+    # ── Phase 4: Outbound Messaging ────────────────────────────────────────────
+    # Provider for outbound delivery: "mock" (default) or future real providers
+    OUTBOUND_PROVIDER: str = "mock"
+    # Maximum delivery attempts per outbound message before marking failed
+    OUTBOUND_MAX_ATTEMPTS: int = 3
 
     @field_validator("CORS_ORIGINS", mode="before")
     @classmethod

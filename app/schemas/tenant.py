@@ -24,6 +24,22 @@ class TenantConfigBase(BaseModel):
     knowledge_enabled: bool = False
     retrieval_top_k: int = Field(default=3, ge=1, le=20)
 
+    # ── Phase 4: Prompt Templates ─────────────────────────────────────────────
+    system_prompt_template: Optional[str] = None
+    reply_prompt_template: Optional[str] = None
+
+    # ── Phase 4: AI Generation Options ────────────────────────────────────────
+    ai_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    ai_max_tokens: int = Field(default=500, ge=100, le=8000)
+
+    # ── Phase 4: Outbound Settings ────────────────────────────────────────────
+    outbound_enabled: bool = False
+    outbound_provider: str = "mock"
+    email_from_address: Optional[str] = None
+    email_from_name: Optional[str] = None
+    rate_limit_enabled: bool = False
+    max_messages_per_hour: int = Field(default=100, ge=1, le=10000)
+
 
 class TenantConfigCreate(TenantConfigBase):
     pass
@@ -47,6 +63,22 @@ class TenantConfigUpdate(BaseModel):
     # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
     knowledge_enabled: Optional[bool] = None
     retrieval_top_k: Optional[int] = Field(default=None, ge=1, le=20)
+
+    # ── Phase 4: Prompt Templates ─────────────────────────────────────────────
+    system_prompt_template: Optional[str] = None
+    reply_prompt_template: Optional[str] = None
+
+    # ── Phase 4: AI Generation Options ────────────────────────────────────────
+    ai_temperature: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    ai_max_tokens: Optional[int] = Field(default=None, ge=100, le=8000)
+
+    # ── Phase 4: Outbound Settings ────────────────────────────────────────────
+    outbound_enabled: Optional[bool] = None
+    outbound_provider: Optional[str] = None
+    email_from_address: Optional[str] = None
+    email_from_name: Optional[str] = None
+    rate_limit_enabled: Optional[bool] = None
+    max_messages_per_hour: Optional[int] = Field(default=None, ge=1, le=10000)
 
 
 class TenantConfigResponse(TenantConfigBase):
@@ -79,6 +111,7 @@ class ChannelConfigResponse(ChannelConfigBase):
     tenant_id: uuid.UUID
     created_at: datetime
     updated_at: datetime
+    # webhook_secret is intentionally excluded from API responses (security)
 
     model_config = {"from_attributes": True}
 

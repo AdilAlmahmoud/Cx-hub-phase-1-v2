@@ -77,10 +77,33 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     handoff_message_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # ── Phase 3: Knowledge Base / RAG ─────────────────────────────────────────
-    # Enable RAG: retrieve knowledge chunks and inject them into AI context
     knowledge_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    # Number of top-k knowledge chunks to retrieve per AI job
     retrieval_top_k: Mapped[int] = mapped_column(Integer, default=3, nullable=False)
+
+    # ── Phase 4: Prompt Templates ─────────────────────────────────────────────
+    # Override the default system prompt sent to the LLM (null = use built-in default)
+    system_prompt_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Override the reply format instructions (null = use built-in default)
+    reply_prompt_template: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ── Phase 4: AI Generation Options ────────────────────────────────────────
+    ai_temperature: Mapped[float] = mapped_column(Float, default=0.2, nullable=False)
+    ai_max_tokens: Mapped[int] = mapped_column(Integer, default=500, nullable=False)
+
+    # ── Phase 4: Outbound Messaging ───────────────────────────────────────────
+    # Master switch for outbound delivery
+    outbound_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Delivery provider: "mock" (default) or future real providers
+    outbound_provider: Mapped[str] = mapped_column(String(50), default="mock", nullable=False)
+
+    # ── Phase 4: Email Sender Identity ────────────────────────────────────────
+    # These are safe display-level fields (not credentials)
+    email_from_address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    email_from_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # ── Phase 4: Rate Limiting ────────────────────────────────────────────────
+    rate_limit_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    max_messages_per_hour: Mapped[int] = mapped_column(Integer, default=100, nullable=False)
 
     # Relationship
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

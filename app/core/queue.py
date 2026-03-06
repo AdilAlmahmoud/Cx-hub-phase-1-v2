@@ -101,6 +101,28 @@ async def enqueue_knowledge_ingestion(file_id: str) -> bool:
         return False
 
 
+async def enqueue_outbound_message(message_id: str) -> bool:
+    """
+    Enqueue an outbound message delivery job by message ID.
+
+    Returns True if successfully enqueued, False if pool is unavailable.
+    The OutboundMessage record must already exist in the DB before calling this.
+    """
+    if _arq_pool is None:
+        logger.warning(
+            "ai_queue_not_available_skip_enqueue",
+            message_id=message_id,
+        )
+        return False
+    try:
+        await _arq_pool.enqueue_job("process_outbound_message", message_id=message_id)
+        logger.info("outbound_message_enqueued", message_id=message_id)
+        return True
+    except Exception as exc:
+        logger.error("outbound_message_enqueue_error", message_id=message_id, error=str(exc))
+        return False
+
+
 def get_queue_pool():
     """Return the current ARQ pool (may be None)."""
     return _arq_pool

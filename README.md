@@ -1,8 +1,8 @@
-# CX Agent Hub — Phase 3 Backend
+# CX Agent Hub — Phase 4 Backend
 
 Multi-tenant AI-powered customer service platform backend.
-Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, vector embeddings
-(pgvector), and file ingestion on top of the Phase 1+2 foundation.
+Phase 4 adds Outbound Messaging, an Email channel adapter, organized Settings APIs, request
+tracing middleware, and final backend hardening on top of the Phase 1+2+3 foundation.
 
 ---
 
@@ -16,12 +16,15 @@ Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, 
 6. [Channel Adapter Architecture](#channel-adapter-architecture)
 7. [AI Decision Engine](#ai-decision-engine)
 8. [Knowledge Base & RAG](#knowledge-base--rag)
-9. [Testing](#testing)
-10. [Seed Data](#seed-data)
-11. [Phase 1 Deliverables](#phase-1-deliverables)
-12. [Phase 2 Deliverables](#phase-2-deliverables)
-13. [Phase 3 Deliverables](#phase-3-deliverables)
-14. [Deferred to Future Phases](#deferred-to-future-phases)
+9. [Outbound Messaging](#outbound-messaging)
+10. [Settings API](#settings-api)
+11. [Testing](#testing)
+12. [Seed Data](#seed-data)
+13. [Phase 1 Deliverables](#phase-1-deliverables)
+14. [Phase 2 Deliverables](#phase-2-deliverables)
+15. [Phase 3 Deliverables](#phase-3-deliverables)
+16. [Phase 4 Deliverables](#phase-4-deliverables)
+17. [Deferred to Future Phases](#deferred-to-future-phases)
 
 ---
 
@@ -31,14 +34,16 @@ Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, 
 ┌─────────────────────────────────────────────────────────────────┐
 │                        Frontend (future)                        │
 └──────────────────────────────┬──────────────────────────────────┘
-                               │ REST / JSON
+                               │ REST / JSON  (X-Request-ID traced)
 ┌──────────────────────────────▼──────────────────────────────────┐
 │                      FastAPI Application                         │
+│  RequestIDMiddleware → CORSMiddleware                            │
 │  ┌─────────────────────────────────────────────────────────┐    │
 │  │  Channel Adapter Layer                                   │    │
 │  │  WhatsApp ──┐                                           │    │
 │  │  WebChat  ──┼──► UnifiedEvent ──► InboundService        │    │
-│  │  SMS      ──┘          │                                │    │
+│  │  SMS      ──┤          │                                │    │
+│  │  Email    ──┘  (Phase 4)                                │    │
 │  └────────────────────────┼────────────────────────────────┘    │
 │                           │ ai_enabled=True                     │
 │  ┌────────────────────────▼────────────────────────────────┐    │
@@ -48,7 +53,16 @@ Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, 
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Knowledge Base API  (Phase 3)                           │   │
 │  │  POST /upload ──► save to disk ──► enqueue ingestion     │   │
-│  │  GET /knowledge  |  GET /knowledge/{id}  |  /reindex     │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Outbound Messaging API  (Phase 4)                       │   │
+│  │  POST /outbound/send ──► create OutboundMessage          │   │
+│  │  ──► enqueue delivery ──► Worker delivers via provider   │   │
+│  └──────────────────────────────────────────────────────────┘   │
+│  ┌──────────────────────────────────────────────────────────┐   │
+│  │  Settings API  (Phase 4)                                 │   │
+│  │  GET/PUT /settings/{ai,prompts,knowledge,outbound,       │   │
+│  │           channels}                                      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │  ┌──────────────────────────────────────────────────────────┐   │
 │  │  Domain API (tenants / users / customers /               │   │
@@ -60,17 +74,24 @@ Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, 
 ┌──────────────────────────────▼──────────────────────────────────┐
 │              PostgreSQL 16 + pgvector extension                  │
 │  knowledge_files | knowledge_chunks (vector(1536))               │
+│  outbound_messages | outbound_attempts  (Phase 4)                │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│  AI Worker (separate process — ARQ)                             │
+│  AI + Outbound Worker (separate process — ARQ)                  │
 │                                                                 │
 │  process_ai_job:                                                │
 │    embed query ──► retrieve top-k chunks ──► inject into LLM   │
 │    AIDecisionEngine ──► AIResult DB                             │
+│    [Phase 4] outbound_enabled + safe_to_auto_send?              │
+│      ──► create OutboundMessage ──► enqueue delivery            │
 │                                                                 │
 │  process_knowledge_ingestion:  (Phase 3)                        │
 │    extract text ──► chunk ──► embed ──► store vectors in DB     │
+│                                                                 │
+│  process_outbound_message:  (Phase 4)                           │
+│    get_outbound_provider(channel).send(msg)                     │
+│    ──► record OutboundAttempt ──► update status                 │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -81,6 +102,8 @@ Phase 3 adds a full Knowledge Base / RAG pipeline, real OpenAI LLM integration, 
 - **Idempotent worker** — re-processing the same job ID is safe; completed jobs are skipped
 - **Policy-driven AI** — per-tenant settings (language, tone, confidence threshold, auto-send mode) control AI behaviour
 - **RAG (Phase 3)** — query embedding → pgvector cosine similarity → top-k chunks injected into LLM system prompt
+- **Outbound delivery (Phase 4)** — provider abstraction (mock + real stubs); AI auto-send + manual agent sends; full delivery audit trail
+- **Request tracing (Phase 4)** — `X-Request-ID` header threaded through all requests; surfaced in responses and logs
 - **API-first** — paginated responses and clean DTOs ready for a frontend dashboard
 
 ---
@@ -99,7 +122,7 @@ cx-agent-hub/
 │   │   ├── storage.py       # [Phase 3] File I/O, text extraction, chunking
 │   │   └── logging.py       # Structured JSON logging (structlog)
 │   ├── models/              # SQLAlchemy ORM models
-│   │   ├── tenant.py        # Tenant, TenantConfig (+ AI policy + knowledge config), ChannelConfig
+│   │   ├── tenant.py        # Tenant, TenantConfig (+ AI + knowledge + outbound config), ChannelConfig
 │   │   ├── user.py          # User (owner / agent roles)
 │   │   ├── customer.py      # Customer (per-tenant, per-channel)
 │   │   ├── conversation.py  # Conversation
@@ -107,12 +130,14 @@ cx-agent-hub/
 │   │   ├── event_log.py     # UnifiedEvent persistence
 │   │   ├── ai_job.py        # AIJob (pending→processing→completed|failed)
 │   │   ├── ai_result.py     # AIResult (structured AI decision output)
-│   │   └── knowledge.py     # [Phase 3] KnowledgeFile, KnowledgeChunk (vector embeddings)
+│   │   ├── knowledge.py     # [Phase 3] KnowledgeFile, KnowledgeChunk (vector embeddings)
+│   │   └── outbound.py      # [Phase 4] OutboundMessage, OutboundAttempt
 │   ├── schemas/             # Pydantic DTOs (request / response)
 │   │   ├── ai_job.py
-│   │   ├── ai_result.py     # Now includes retrieved_chunk_ids
-│   │   ├── knowledge.py     # [Phase 3] KnowledgeFileResponse, KnowledgeUploadResponse, etc.
-│   │   └── tenant.py        # Includes knowledge_enabled, retrieval_top_k
+│   │   ├── ai_result.py     # Includes retrieved_chunk_ids
+│   │   ├── knowledge.py     # [Phase 3] KnowledgeFileResponse, etc.
+│   │   ├── outbound.py      # [Phase 4] OutboundSendRequest, OutboundMessageResponse, etc.
+│   │   └── tenant.py        # Includes knowledge + Phase 4 outbound/prompt fields
 │   ├── ai/                  # AI provider abstraction layer
 │   │   ├── base.py          # AIProcessingContext, AIDecisionResult, BaseAIProvider, RetrievedChunk
 │   │   ├── engine.py        # AIDecisionEngine (policy enforcement)
@@ -123,22 +148,40 @@ cx-agent-hub/
 │   │   ├── mock_provider.py # Deterministic mock (SHA-256 seeded unit-length vectors)
 │   │   └── openai_provider.py # OpenAI text-embedding-3-small + get_embedding_provider() factory
 │   ├── adapters/            # Channel adapter layer
-│   │   ├── base.py
+│   │   ├── base.py          # ChannelType enum (whatsapp|webchat|sms|email), UnifiedEvent
 │   │   ├── whatsapp.py
 │   │   ├── webchat.py
-│   │   └── sms.py
+│   │   ├── sms.py
+│   │   └── email.py         # [Phase 4] Email inbound adapter (RFC 2822 from parsing, body/subject)
+│   ├── outbound/            # [Phase 4] Outbound delivery provider abstraction
+│   │   ├── base.py          # BaseOutboundProvider ABC, OutboundResult dataclass
+│   │   ├── mock_provider.py # MockOutboundProvider — logs only, always succeeds
+│   │   ├── registry.py      # get_outbound_provider(channel) factory (mock or real stubs)
+│   │   ├── whatsapp_provider.py  # Real provider stub (Meta Cloud API TODO)
+│   │   ├── sms_provider.py       # Real provider stub (Twilio TODO)
+│   │   ├── email_provider.py     # Real provider stub (SendGrid TODO)
+│   │   └── webchat_provider.py   # Real provider stub (WebSocket TODO)
 │   ├── services/            # Business logic
 │   │   ├── inbound_service.py
 │   │   ├── ai_job_service.py
-│   │   ├── knowledge_service.py # [Phase 3] Ingestion pipeline + vector retrieval
+│   │   ├── knowledge_service.py   # [Phase 3] Ingestion pipeline + vector retrieval
+│   │   ├── outbound_service.py    # [Phase 4] create/deliver/list/cancel OutboundMessages
 │   │   ├── tenant_service.py
 │   │   ├── user_service.py
 │   │   ├── customer_service.py
 │   │   ├── conversation_service.py
 │   │   └── ticket_service.py
+│   ├── core/
+│   │   ├── config.py        # Settings from env vars (incl. Phase 2+3+4)
+│   │   ├── database.py      # Async SQLAlchemy engine + pgvector codec registration
+│   │   ├── queue.py         # ARQ Redis pool — init/close/enqueue helpers (incl. Phase 4)
+│   │   ├── security.py      # Password hashing + JWT (stdlib only)
+│   │   ├── storage.py       # [Phase 3] File I/O, text extraction, chunking
+│   │   ├── middleware.py    # [Phase 4] RequestIDMiddleware (X-Request-ID)
+│   │   └── logging.py       # Structured JSON logging (structlog)
 │   ├── worker/
 │   │   ├── main.py          # ARQ WorkerSettings (run: python -m app.worker.main)
-│   │   └── tasks.py         # process_ai_job + process_knowledge_ingestion [Phase 3]
+│   │   └── tasks.py         # process_ai_job + process_knowledge_ingestion + process_outbound_message
 │   └── api/v1/              # REST API routes
 │       ├── auth/
 │       ├── tenants/
@@ -146,34 +189,40 @@ cx-agent-hub/
 │       ├── customers/
 │       ├── conversations/
 │       ├── tickets/
-│       ├── channels/
+│       ├── channels/        # Inbound webhooks (WhatsApp, WebChat, SMS, Email [Phase 4])
 │       ├── ai_jobs/
-│       └── knowledge/       # [Phase 3] Upload, list, get, reindex
+│       ├── knowledge/       # [Phase 3] Upload, list, get, reindex
+│       ├── outbound/        # [Phase 4] Send, list, get, cancel, attempts
+│       └── settings/        # [Phase 4] AI, prompts, knowledge, outbound, channels settings
 ├── migrations/              # Alembic migrations
 │   └── versions/
 │       ├── 001_initial_schema.py
 │       ├── 002_phase2_ai_tables.py
-│       └── 003_phase3_knowledge.py  # [Phase 3] knowledge_files, knowledge_chunks, pgvector
+│       ├── 003_phase3_knowledge.py  # knowledge_files, knowledge_chunks, pgvector
+│       └── 004_phase4_outbound.py   # [Phase 4] outbound_messages, outbound_attempts, TenantConfig cols
 ├── tests/
 │   ├── unit/
-│   │   ├── test_adapters.py
+│   │   ├── test_adapters.py    # WhatsApp, WebChat, SMS, Email adapters + contract tests
 │   │   ├── test_security.py
 │   │   ├── test_ai_engine.py
 │   │   ├── test_ai_worker.py
-│   │   └── test_knowledge.py  # [Phase 3] chunking, extraction, embeddings, ingestion, RAG
+│   │   ├── test_knowledge.py   # [Phase 3] chunking, extraction, embeddings, ingestion, RAG
+│   │   └── test_outbound.py    # [Phase 4] Mock provider, registry, create/deliver/cancel service
 │   └── integration/
 │       ├── test_health.py
 │       ├── test_auth.py
 │       ├── test_inbound_channels.py
 │       ├── test_tenant_isolation.py
 │       ├── test_ai_jobs.py
-│       └── test_knowledge_api.py  # [Phase 3] Upload, list, reindex, RBAC, isolation, AI+RAG
+│       ├── test_knowledge_api.py   # [Phase 3] Upload, list, reindex, RBAC, isolation, AI+RAG
+│       ├── test_outbound_api.py    # [Phase 4] Send, list, get, cancel, RBAC, tenant isolation
+│       └── test_settings_api.py   # [Phase 4] GET/PUT all settings sections, RBAC, isolation
 ├── scripts/
 │   └── seed.py
 ├── data/
 │   └── knowledge/           # [Phase 3] Mounted Docker volume for uploaded knowledge files
 ├── Dockerfile
-├── docker-compose.yml       # pgvector image + knowledge_data volume
+├── docker-compose.yml       # pgvector image + knowledge_data volume + Phase 4 env vars
 ├── .env.example
 └── requirements.txt
 ```
@@ -224,10 +273,10 @@ Docker Desktop will:
 1. Build the FastAPI + worker image
 2. Start PostgreSQL with **pgvector** extension (port `5432`)
 3. Start Redis (port `6379`)
-4. Run Alembic migrations automatically (Phase 1 + Phase 2 + Phase 3 tables including `knowledge_files`, `knowledge_chunks`, and `vector(1536)` column)
+4. Run Alembic migrations automatically (Phase 1–4 tables including `knowledge_files`, `knowledge_chunks`, `outbound_messages`, `outbound_attempts`, and `vector(1536)` column)
 5. Seed the demo tenant
 6. Start the FastAPI API on port `8000`
-7. Start the AI worker process (polls Redis for AI jobs and ingestion jobs)
+7. Start the AI + Outbound worker process (polls Redis for AI jobs, knowledge ingestion, and outbound delivery)
 
 > First startup may take 2–3 minutes while Docker pulls images and builds.
 
@@ -360,6 +409,9 @@ docker compose run --rm api python -m pytest tests/ -v
 | `EMBEDDING_DIMENSIONS` | `1536` | Vector dimensions (must match the model) |
 | `KNOWLEDGE_CHUNK_SIZE` | `1000` | Max characters per knowledge chunk |
 | `KNOWLEDGE_CHUNK_OVERLAP` | `100` | Overlap characters between consecutive chunks |
+| **Phase 4** | | |
+| `OUTBOUND_PROVIDER` | `mock` | Outbound delivery provider: `mock` (logs only) or `real` (channel-specific stubs) |
+| `OUTBOUND_MAX_ATTEMPTS` | `3` | Max delivery attempts per outbound message |
 
 ---
 
@@ -401,6 +453,23 @@ When the server is running, full interactive documentation is at:
 | `GET` | `/api/v1/knowledge` | agent+ | List knowledge files (paginated, filterable by status) |
 | `GET` | `/api/v1/knowledge/{id}` | agent+ | Get knowledge file details |
 | `POST` | `/api/v1/knowledge/{id}/reindex` | owner | Re-trigger ingestion for a knowledge file |
+| **Phase 4** | | | |
+| `POST` | `/api/v1/inbound/email/{slug}` | None | Receive inbound email (normalised via EmailAdapter) |
+| `POST` | `/api/v1/outbound/send` | agent+ | Queue a manual outbound message (returns 202) |
+| `GET` | `/api/v1/outbound` | agent+ | List outbound messages (paginated; filter by conversation/ticket/status) |
+| `GET` | `/api/v1/outbound/{id}` | agent+ | Get outbound message detail (with delivery attempts) |
+| `GET` | `/api/v1/outbound/{id}/attempts` | agent+ | List delivery attempts for a message |
+| `POST` | `/api/v1/outbound/{id}/cancel` | agent+ | Cancel a pending outbound message |
+| `GET` | `/api/v1/settings` | any | Settings overview (all categories summary) |
+| `GET` | `/api/v1/settings/ai` | any | Get AI/LLM settings |
+| `PUT` | `/api/v1/settings/ai` | owner | Update AI/LLM settings |
+| `GET` | `/api/v1/settings/prompts` | owner | Get prompt template settings |
+| `PUT` | `/api/v1/settings/prompts` | owner | Update prompt templates (null = revert to built-in default) |
+| `GET` | `/api/v1/settings/knowledge` | any | Get knowledge/RAG settings |
+| `PUT` | `/api/v1/settings/knowledge` | owner | Update knowledge/RAG settings |
+| `GET` | `/api/v1/settings/outbound` | any | Get outbound messaging settings |
+| `PUT` | `/api/v1/settings/outbound` | owner | Update outbound messaging settings |
+| `GET` | `/api/v1/settings/channels` | any | Get channel configuration (enabled/disabled; no secrets) |
 
 All list endpoints support `?page=1&page_size=20` pagination.
 
@@ -414,13 +483,24 @@ Each inbound channel has a dedicated **adapter** that normalises the raw webhook
 class UnifiedEvent(BaseModel):
     event_id: str
     tenant_id: str
-    channel: ChannelType   # whatsapp | webchat | sms
+    channel: ChannelType   # whatsapp | webchat | sms | email
     external_user_identifier: str
     message_text: str | None
     timestamp: datetime
     raw_payload: dict | None
     metadata: dict | None
 ```
+
+**Available adapters:**
+
+| Adapter | Endpoint | External identifier | Notes |
+|---|---|---|---|
+| WhatsApp | `POST /inbound/whatsapp/{slug}` | Phone number | `from`, `text.body`, `interactive` button replies |
+| WebChat | `POST /inbound/webchat/{slug}` | `session_id` | `message` or `text` field |
+| SMS | `POST /inbound/sms/{slug}` | Phone number | `body`, `text`, or `message` field |
+| Email | `POST /inbound/email/{slug}` | Sender email | RFC 2822 `from` parsing; `body`/`text`/`html_body`; `subject` as fallback; thread metadata |
+
+**Email adapter metadata fields:** `message_id`, `subject`, `from_raw`, `to`, `in_reply_to`, `thread_id`, `has_attachments`
 
 To add a new channel (e.g. Telegram):
 
@@ -463,6 +543,8 @@ InboundService.process()
                                                        |
                                                AIResult persisted (with retrieved_chunk_ids)
                                                AIJob --> completed
+                                               [Phase 4] outbound_enabled + safe_to_auto_send?
+                                               --> create OutboundMessage --> enqueue delivery
 ```
 
 ### AI Provider abstraction
@@ -616,10 +698,103 @@ The IVFFlat index on `knowledge_chunks.embedding` ensures fast ANN search per te
 
 ---
 
+## Outbound Messaging
+
+### Overview
+
+Phase 4 adds a complete outbound delivery pipeline:
+
+```
+Agent sends message (POST /outbound/send)   OR   AI auto-send (outbound_enabled + safe_to_auto_send)
+         |                                                  |
+         +--------------------------------------------------+
+         |
+         v
+create OutboundMessage (status=pending) --> commit --> enqueue_outbound_message()
+                                                              |
+                                                        Redis queue  <-- 202 returned immediately
+                                                              |
+                                                      Worker picks up:
+                                                              |
+                                              get_outbound_provider(channel).send(msg)
+                                                              |
+                                              record OutboundAttempt (success | failure)
+                                                              |
+                                              update OutboundMessage.status
+                                              --> delivered | pending (retry) | failed
+```
+
+### Outbound message lifecycle
+
+```
+pending → sending → delivered
+                \→ pending   (retry, attempt_count < max_attempts)
+                \→ failed    (attempt_count >= max_attempts)
+cancelled        (abandoned before first send)
+```
+
+### Provider abstraction
+
+All delivery providers implement `BaseOutboundProvider`:
+
+```python
+class BaseOutboundProvider(ABC):
+    @property @abstractmethod
+    def provider_name(self) -> str: ...    # "mock", "twilio", "sendgrid", ...
+    @property @abstractmethod
+    def channel(self) -> str: ...          # "whatsapp", "sms", "email", "webchat"
+
+    @abstractmethod
+    async def send(self, message: OutboundMessage) -> OutboundResult: ...
+    @abstractmethod
+    async def health_check(self) -> bool: ...
+```
+
+### Provider modes
+
+| `OUTBOUND_PROVIDER` | Behaviour |
+|---|---|
+| `mock` (default) | `MockOutboundProvider` handles all channels — logs via structlog, always returns success. No real API calls. Suitable for development, CI, and demos. |
+| `real` | Routes to channel-specific stubs (WhatsApp → Meta Cloud API, SMS → Twilio, Email → SendGrid, WebChat → stub). Each stub returns `provider_not_configured` until real credentials are added. |
+
+### AI auto-send
+
+When `outbound_enabled=True` on `TenantConfig`, after every successful AI job, if `decision.safe_to_auto_send=True`:
+
+1. Loads the `Conversation` and `Customer` linked to the job
+2. Creates an `OutboundMessage` (is_ai_generated=True)
+3. Enqueues `process_outbound_message` for async delivery
+4. This step is **non-fatal** — a failure here does not affect the already-persisted AIResult
+
+Set `auto_send_mode="auto"` and `outbound_enabled=True` together for fully automated AI replies.
+
+---
+
+## Settings API
+
+Phase 4 provides organized settings endpoints for each configuration domain. All settings are scoped to the current tenant and backed by `TenantConfig`.
+
+| Section | Endpoint | Readable by | Writable by |
+|---|---|---|---|
+| Overview | `GET /settings` | any | — |
+| AI/LLM | `GET/PUT /settings/ai` | any / owner | owner |
+| Prompt templates | `GET/PUT /settings/prompts` | owner | owner |
+| Knowledge/RAG | `GET/PUT /settings/knowledge` | any / owner | owner |
+| Outbound | `GET/PUT /settings/outbound` | any / owner | owner |
+| Channels | `GET /settings/channels` | any | — (use `/channels` API to configure) |
+
+**Read-only fields** (surfaced from env vars, not stored in DB): `ai_provider`, `ai_model`, `embedding_provider`, `embedding_model`, `chunk_size`, `chunk_overlap`
+
+**Prompt templates:** Setting a template to `null` reverts to the built-in default prompt (controlled by owner only).
+
+**Security:** Channel settings never expose `webhook_secret` or provider credentials.
+
+---
+
 ## Testing
 
 ```bash
-# All tests (192 tests, 1 skipped)
+# All tests (289 tests, 1 skipped)
 python -m pytest tests/ -v
 
 # Unit tests only
@@ -635,7 +810,8 @@ python -m pytest tests/ --cov=app --cov-report=term-missing
 **Test coverage includes:**
 
 *Unit tests:*
-- Channel adapter normalisation (WhatsApp, WebChat, SMS)
+- Channel adapter normalisation (WhatsApp, WebChat, SMS, Email)
+- Email adapter: RFC 2822 `from` parsing, body/text/html_body/subject fallbacks, metadata, timestamps
 - JWT creation and validation
 - Password hashing and verification
 - AI intent detection (all intent categories + custom keywords)
@@ -650,6 +826,12 @@ python -m pytest tests/ --cov=app --cov-report=term-missing
 - **[Phase 3]** AI engine with RAG — chunks injected into answer, escalation ignores RAG, chunk_ids tracked
 - **[Phase 3]** Knowledge retrieval fallback — graceful empty list on SQLite (no pgvector)
 - **[Phase 3]** Knowledge worker task — `_process_knowledge_ingestion_inner` success and not-found paths
+- **[Phase 4]** `OutboundResult` dataclass, `MockOutboundProvider` send + health_check
+- **[Phase 4]** `get_outbound_provider` registry — mock mode all channels, unknown channel fallback, lowercasing
+- **[Phase 4]** `create_outbound_message` — pending status, default max_attempts, AI generated flag
+- **[Phase 4]** `deliver_outbound_message` — success → delivered, idempotency skip, not-found, max_attempts exceeded
+- **[Phase 4]** `deliver_outbound_message` — attempt record creation (status=success, provider=mock)
+- **[Phase 4]** `cancel_outbound_message` — cancels pending, no-op on delivered, wrong tenant → None
 
 *Integration tests:*
 - Multi-tenant data isolation (customers, conversations, tickets, users, AI jobs)
@@ -669,6 +851,18 @@ python -m pytest tests/ --cov=app --cov-report=term-missing
 - **[Phase 3]** Tenant isolation (tenant B cannot see/access tenant A's files)
 - **[Phase 3]** AI job completes with `knowledge_enabled=True` (RAG fallback on SQLite)
 - **[Phase 3]** Tenant config `knowledge_enabled` + `retrieval_top_k` CRUD + validation
+- **[Phase 4]** POST /outbound/send — agent/owner 202, unauthenticated 401, wrong-tenant conv 404
+- **[Phase 4]** POST /outbound/send — email channel with subject field
+- **[Phase 4]** GET /outbound — empty list, tenant isolation, conversation filter
+- **[Phase 4]** GET /outbound/{id} — detail + attempts; wrong tenant → 404
+- **[Phase 4]** POST /outbound/{id}/cancel — cancels pending; non-existent → 404
+- **[Phase 4]** Settings overview — all tenants see own settings only
+- **[Phase 4]** GET/PUT /settings/ai — agent can GET; only owner can PUT; validation (confidence 0-1, temp 0-2)
+- **[Phase 4]** GET/PUT /settings/prompts — owner only; agent → 403; too-long template → 422
+- **[Phase 4]** GET/PUT /settings/knowledge — agent read; owner write; top_k > 20 → 422
+- **[Phase 4]** GET/PUT /settings/outbound — agent read; owner write; max_messages_per_hour < 1 → 422
+- **[Phase 4]** GET /settings/channels — webhook secrets never exposed in response
+- **[Phase 4]** Settings tenant isolation — update tenant A does not affect tenant B
 
 ---
 
@@ -776,18 +970,56 @@ python -m scripts.seed
 
 ---
 
+## Phase 4 Deliverables
+
+| # | Deliverable | Status |
+|---|---|---|
+| 1 | `OutboundMessage` + `OutboundAttempt` models (`app/models/outbound.py`) | ✅ |
+| 2 | Alembic migration 004 — `outbound_messages`, `outbound_attempts`, Phase 4 TenantConfig columns | ✅ |
+| 3 | Outbound provider abstraction — `BaseOutboundProvider` ABC, `OutboundResult` dataclass | ✅ |
+| 4 | `MockOutboundProvider` — logs via structlog, always returns success, safe for all channels | ✅ |
+| 5 | Real provider stubs — WhatsApp, SMS, Email, WebChat (return `provider_not_configured`; TODOs for real APIs) | ✅ |
+| 6 | `get_outbound_provider(channel)` factory — env-driven, defaults to mock | ✅ |
+| 7 | `outbound_service.py` — `create_outbound_message`, `deliver_outbound_message` (with retry), `cancel_outbound_message`, list/get | ✅ |
+| 8 | `process_outbound_message` ARQ worker task — testable inner function pattern | ✅ |
+| 9 | AI auto-send integration in `process_ai_job` — non-fatal, triggered when `outbound_enabled + safe_to_auto_send` | ✅ |
+| 10 | Outbound API router — POST /send, GET list (paginated+filtered), GET detail+attempts, POST cancel | ✅ |
+| 11 | RBAC on outbound endpoints — agent+owner can send; unauthenticated → 401 | ✅ |
+| 12 | Tenant isolation on outbound — cross-tenant conversation → 404 | ✅ |
+| 13 | Email inbound adapter (`app/adapters/email.py`) — RFC 2822 from parsing, body/text/html_body fallback, thread metadata | ✅ |
+| 14 | `ChannelType.email` added to adapter base enum | ✅ |
+| 15 | `POST /inbound/email/{slug}` endpoint | ✅ |
+| 16 | Settings API router (`app/api/v1/settings/`) — overview + ai/prompts/knowledge/outbound/channels sections | ✅ |
+| 17 | Prompt template fields in TenantConfig (`system_prompt_template`, `reply_prompt_template`) | ✅ |
+| 18 | Phase 4 TenantConfig fields — `ai_temperature`, `ai_max_tokens`, `outbound_enabled`, `outbound_provider`, `email_from_*`, `rate_limit_enabled`, `max_messages_per_hour` | ✅ |
+| 19 | Webhook secrets excluded from all API responses | ✅ |
+| 20 | `RequestIDMiddleware` — reuse client `X-Request-ID` or generate UUID4; stored on `request.state` and echoed in response headers | ✅ |
+| 21 | CORS updated to expose `X-Request-ID` | ✅ |
+| 22 | Enhanced `/health` endpoint — checks DB (`SELECT 1`) and Redis pool; returns `"ok"` or `"degraded"` with per-check details | ✅ |
+| 23 | `enqueue_outbound_message()` in `app/core/queue.py` | ✅ |
+| 24 | `docker-compose.yml` updated with Phase 4 env vars (`OUTBOUND_PROVIDER`, `OUTBOUND_MAX_ATTEMPTS`) | ✅ |
+| 25 | `.env.example` updated with Phase 4 variables | ✅ |
+| 26 | Unit tests — outbound provider, registry, service (create/deliver/cancel/idempotency) | ✅ |
+| 27 | Unit tests — email adapter (all normalization cases + cross-adapter contract) | ✅ |
+| 28 | Integration tests — outbound API (send, list, get, cancel, RBAC, tenant isolation) | ✅ |
+| 29 | Integration tests — settings API (all sections, RBAC, validation, tenant isolation) | ✅ |
+| 30 | Full test suite — 289 passed, 1 skipped | ✅ |
+| 31 | README updated for Phase 4 | ✅ |
+
+---
+
 ## Deferred to Future Phases
 
 | Feature | Notes |
 |---|---|
-| Outbound message sending | `safe_to_auto_send` flag is computed but sending is not yet implemented |
-| Real WhatsApp provider | Plug in Meta Cloud API or Twilio adapter |
-| Real SMS provider | Plug in Twilio, Vonage, or AWS SNS adapter |
+| Real WhatsApp outbound provider | Plug in Meta Cloud API — stub exists in `app/outbound/whatsapp_provider.py` |
+| Real SMS outbound provider | Plug in Twilio/Vonage — stub exists in `app/outbound/sms_provider.py` |
+| Real Email outbound provider | Plug in SendGrid/Mailgun — stub exists in `app/outbound/email_provider.py` |
 | Frontend UI | Consumes existing REST APIs (pagination + DTOs ready) |
-| Email channel adapter | Same pattern as existing adapters |
-| Webhook signature verification | Per-channel HMAC validation (secret stored in ChannelConfig) |
-| Rate limiting | Redis-based per-tenant throttling |
+| Webhook signature verification | Per-channel HMAC validation (secret stored in ChannelConfig, excluded from responses) |
+| Rate limiting enforcement | `rate_limit_enabled` + `max_messages_per_hour` stored in TenantConfig; enforcement logic deferred |
 | Audit log | Track all state changes with actor |
 | Analytics API | Aggregated metrics per tenant |
 | Voice channel | IVR / telephony integration |
 | WebSocket push | Real-time dashboard updates |
+| Enterprise secret manager | Vault / AWS Secrets Manager for provider credentials |

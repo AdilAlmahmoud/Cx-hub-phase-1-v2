@@ -1,5 +1,6 @@
 """
-ARQ worker tasks — Phase 2 AI processing + Phase 3 knowledge ingestion.
+ARQ worker tasks — Phase 2 AI processing + Phase 3 knowledge ingestion
+                    + Phase 4 outbound delivery.
 
 Design rules:
 - Every task is idempotent: re-running with the same ID is safe.
@@ -26,7 +27,7 @@ from app.models.tenant import TenantConfig
 logger = get_logger(__name__)
 
 
-# ── AI Job (Phase 2 + Phase 3 RAG) ───────────────────────────────────────────
+# ── AI Job (Phase 2 + Phase 3 RAG + Phase 4 auto-send) ───────────────────────
 
 async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
     """
@@ -39,6 +40,9 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
 
     Phase 3: If knowledge_enabled=True, embeds the message and retrieves
     relevant knowledge chunks (RAG) before calling the AI engine.
+
+    Phase 4: If outbound_enabled=True and safe_to_auto_send=True, creates
+    and enqueues an OutboundMessage for delivery (non-fatal if it fails).
     """
     job_uuid = uuid.UUID(ai_job_id)
 
@@ -87,6 +91,7 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
         handoff_template = getattr(tenant_cfg, "handoff_message_template", None) if tenant_cfg else None
         knowledge_enabled = getattr(tenant_cfg, "knowledge_enabled", False) if tenant_cfg else False
         retrieval_top_k = getattr(tenant_cfg, "retrieval_top_k", 3) if tenant_cfg else 3
+        outbound_enabled = getattr(tenant_cfg, "outbound_enabled", False) if tenant_cfg else False
 
         # ── 5. Load conversation history (last 10 events) ─────────────────────
         events_result = await db.execute(
@@ -221,6 +226,55 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
             safe_to_auto_send=decision.safe_to_auto_send,
         )
 
+        # ── 10. Phase 4: Auto-send if policy permits ──────────────────────────
+        if outbound_enabled and decision.safe_to_auto_send and decision.answer:
+            try:
+                from app.models.conversation import Conversation
+                from app.models.customer import Customer
+                from app.services.outbound_service import create_outbound_message
+                from app.core.queue import enqueue_outbound_message
+
+                conv_r = await db.execute(
+                    select(Conversation).where(Conversation.id == job.conversation_id)
+                )
+                conversation = conv_r.scalar_one_or_none()
+                if conversation:
+                    cust_r = await db.execute(
+                        select(Customer).where(Customer.id == conversation.customer_id)
+                    )
+                    customer = cust_r.scalar_one_or_none()
+                    if customer:
+                        # Fetch persisted AIResult ID
+                        ar_row = await db.execute(
+                            select(AIResult).where(AIResult.ai_job_id == job.id)
+                        )
+                        persisted_result = ar_row.scalar_one_or_none()
+                        outbound_msg = await create_outbound_message(
+                            db=db,
+                            tenant_id=job.tenant_id,
+                            conversation_id=conversation.id,
+                            channel=conversation.channel,
+                            recipient_identifier=customer.external_id,
+                            message_text=decision.answer,
+                            ticket_id=job.ticket_id,
+                            ai_result_id=persisted_result.id if persisted_result else None,
+                            is_ai_generated=True,
+                        )
+                        await enqueue_outbound_message(str(outbound_msg.id))
+                        logger.info(
+                            "ai_auto_send_enqueued",
+                            ai_job_id=ai_job_id,
+                            outbound_message_id=str(outbound_msg.id),
+                            channel=conversation.channel,
+                        )
+            except Exception as auto_send_exc:
+                # Non-fatal: AI job is already completed, log and continue
+                logger.warning(
+                    "ai_auto_send_failed",
+                    ai_job_id=ai_job_id,
+                    error=str(auto_send_exc),
+                )
+
         return {
             "status": "completed",
             "ai_job_id": ai_job_id,
@@ -230,7 +284,7 @@ async def _process_ai_job_inner(db: AsyncSession, ai_job_id: str) -> dict:
         }
 
     except Exception as exc:
-        # ── 10. Handle failure with retry tracking ─────────────────────────────
+        # ── 11. Handle failure with retry tracking ────────────────────────────
         job.retry_count += 1
         job.error_message = str(exc)[:2000]  # cap at 2k chars
 
@@ -301,3 +355,30 @@ async def process_knowledge_ingestion(ctx: dict, file_id: str) -> dict:
 
     async with db_factory() as db:
         return await _process_knowledge_ingestion_inner(db, file_id)
+
+
+# ── Outbound Delivery (Phase 4) ───────────────────────────────────────────────
+
+async def _process_outbound_message_inner(db: AsyncSession, message_id: str) -> dict:
+    """
+    Core outbound delivery logic.
+    Testable without a running Redis/ARQ instance.
+    """
+    from app.services.outbound_service import deliver_outbound_message
+    msg_uuid = uuid.UUID(message_id)
+    return await deliver_outbound_message(db, msg_uuid)
+
+
+async def process_outbound_message(ctx: dict, message_id: str) -> dict:
+    """
+    ARQ task: deliver a single outbound message via the configured provider.
+
+    ctx must contain 'db_session_factory'.
+    """
+    db_factory = ctx.get("db_session_factory")
+    if db_factory is None:
+        logger.error("worker_missing_db_factory", message_id=message_id)
+        return {"status": "error", "reason": "no_db_factory"}
+
+    async with db_factory() as db:
+        return await _process_outbound_message_inner(db, message_id)

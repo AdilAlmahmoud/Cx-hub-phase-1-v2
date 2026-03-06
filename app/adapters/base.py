@@ -17,6 +17,7 @@ class ChannelType(str, Enum):
     whatsapp = "whatsapp"
     webchat = "webchat"
     sms = "sms"
+    email = "email"
 
 
 class UnifiedEvent(BaseModel):

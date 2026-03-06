@@ -16,6 +16,7 @@ from app.api.deps import DB
 from app.adapters.whatsapp import WhatsAppAdapter
 from app.adapters.webchat import WebChatAdapter
 from app.adapters.sms import SMSAdapter
+from app.adapters.email import EmailAdapter
 from app.services.inbound_service import inbound_service
 from app.services.tenant_service import tenant_service
 from app.core.logging import get_logger
@@ -28,6 +29,7 @@ _adapters = {
     "whatsapp": WhatsAppAdapter(),
     "webchat": WebChatAdapter(),
     "sms": SMSAdapter(),
+    "email": EmailAdapter(),
 }
 
 
@@ -78,3 +80,19 @@ async def inbound_sms(
 ):
     """Receive an SMS inbound message and process it."""
     return await _handle_inbound("sms", tenant_slug, payload, db)
+
+
+@router.post("/email/{tenant_slug}", status_code=status.HTTP_202_ACCEPTED)
+async def inbound_email(
+    tenant_slug: str = Path(..., description="Tenant slug used for webhook routing"),
+    payload: dict[str, Any] = {},
+    db: DB = None,
+):
+    """
+    Receive an inbound email and process it.
+
+    Compatible with inbound parse webhooks from providers such as
+    SendGrid, Mailgun, Postmark, or AWS SES SNS.
+    Payload must contain at least a 'from' field.
+    """
+    return await _handle_inbound("email", tenant_slug, payload, db)

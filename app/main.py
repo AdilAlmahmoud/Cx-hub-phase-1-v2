@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.logging import configure_logging, get_logger
+from app.core.middleware import RequestIDMiddleware
 from app.api.v1.router import api_router
+from app.api.deps import get_db
 
 configure_logging()
 logger = get_logger(__name__)
@@ -29,8 +32,10 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description=(
         "CX Agent Hub — Multi-tenant AI-powered customer service platform. "
-        "Phase 1: Channel adapter layer, multi-tenant foundation, RBAC. "
-        "Phase 2: Async AI decision engine, job queue, structured AI results."
+        "Phase 1: Channel adapters, multi-tenant foundation, RBAC. "
+        "Phase 2: Async AI decision engine, job queue, structured AI results. "
+        "Phase 3: Knowledge base, RAG, pgvector embeddings, real OpenAI integration. "
+        "Phase 4: Outbound messaging, email channel, settings API, hardening."
     ),
     docs_url="/docs",
     redoc_url="/redoc",
@@ -38,25 +43,57 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Request ID middleware (Phase 4) — must be added before CORS
+app.add_middleware(RequestIDMiddleware)
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "X-Request-ID"],
+    expose_headers=["X-Request-ID"],
 )
 
 
-# Health endpoint
+# ── Health endpoint (enhanced in Phase 4) ─────────────────────────────────────
+
 @app.get("/health", tags=["System"], summary="Health check")
-async def health_check():
-    """Returns service health status."""
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """
+    Returns service health status with dependency checks.
+
+    Checks:
+    - Database connectivity (PostgreSQL)
+    - Redis / queue connectivity
+    """
+    from app.core.queue import get_queue_pool
+
+    # DB check
+    db_ok = False
+    try:
+        from sqlalchemy import text
+        await db.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        pass
+
+    # Redis/queue check
+    queue_pool = get_queue_pool()
+    redis_ok = queue_pool is not None
+
+    overall = "ok" if db_ok else "degraded"
+
     return {
-        "status": "ok",
+        "status": overall,
         "service": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
+        "checks": {
+            "database": "ok" if db_ok else "unavailable",
+            "queue": "ok" if redis_ok else "unavailable",
+        },
     }
 
 
